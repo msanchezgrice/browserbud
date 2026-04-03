@@ -4,7 +4,7 @@ import { Play, Square, Mic, MicOff, User, Clock, MessageSquare, Monitor, Monitor
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { formatLatency, mergeIncrementalTranscript, truncateSessionHandle } from './liveUtils';
+import { formatActivityLogEntry, formatLatency, mergeIncrementalTranscript, truncateSessionHandle } from './liveUtils';
 
 const apiKey = process.env.GEMINI_API_KEY;
 const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
@@ -88,8 +88,8 @@ const TAB_METADATA: Record<AppTab, { label: string; toolName: string; descriptio
   activity: {
     label: 'Activity Log',
     toolName: 'Tool: logActivity',
-    description: 'Meaningful task and page changes are summarized here.',
-    emptyState: 'No activity logged yet. Ask the companion to log what you are doing.',
+    description: 'Structured records with timestamp, app, page, URL, and summary land here.',
+    emptyState: 'No activity logged yet. Ask the companion to log what you are doing or save the current page context.',
   },
   notes: {
     label: 'Saved Notes',
@@ -574,7 +574,7 @@ export default function App() {
 
 Tool rules:
 - The Helpful Info tab stores reusable recommendations, links, and takeaways. If the user asks you to save something useful for later, call appendHelpfulInfo in this turn.
-- The Activity Log tab stores concise records of meaningful task changes. Call logActivity when the user explicitly asks for it or when there is a clear task/page change worth recording.
+- The Activity Log tab stores structured records of meaningful task and page changes. When you call logActivity, include the app name, page title, visible URL if available, a one-line summary, and brief details. Call it when the user explicitly asks for logging or when there is a clear task/page change worth recording.
 - The Saved Notes tab stores direct reminders, todos, and remember-this requests. If the user says add a note, save this, or remember this, you must call saveNote in this turn before you finish responding.
 - Do not use tools on every turn.
 - Prioritize clean, complete spoken responses over fragmented quick replies.` }]
@@ -598,15 +598,17 @@ Tool rules:
             },
             {
               name: 'logActivity',
-              description: 'Add a concise entry to the Activity Log tab describing a meaningful task or page change.',
+              description: 'Add a structured entry to the Activity Log tab describing a meaningful task or page change.',
               parameters: {
                 type: Type.OBJECT,
                 properties: {
-                  location: { type: Type.STRING, description: 'URL, app name, or context location.' },
-                  topic: { type: Type.STRING, description: 'Main topic of the activity.' },
-                  details: { type: Type.STRING, description: 'Brief details of what happened.' }
+                  appName: { type: Type.STRING, description: 'The app or site in focus, such as Chrome, Figma, Linear, or Gmail.' },
+                  pageTitle: { type: Type.STRING, description: 'The page, tab, or screen title if visible.' },
+                  url: { type: Type.STRING, description: 'The current URL if it is visible on screen.' },
+                  summary: { type: Type.STRING, description: 'One concise sentence summarizing what the user is doing.' },
+                  details: { type: Type.STRING, description: 'Optional extra details worth remembering.' }
                 },
-                required: ['location', 'topic', 'details']
+                required: ['appName', 'summary']
               }
             },
             {
@@ -829,9 +831,9 @@ Tool rules:
                     functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
                   } else if (call.name === 'logActivity') {
                     const args = call.args as any;
-                    const logEntry = `- **[${timestamp}] ${args.location}** (${args.topic}): ${args.details}\n`;
+                    const logEntry = formatActivityLogEntry(args, timestamp);
                     setActivityLog((prev) => logEntry + prev);
-                    setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Logged activity to the Activity Log tab.', role: 'system' }, ...prev]);
+                    setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Logged structured activity to the Activity Log tab.', role: 'system' }, ...prev]);
                     functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
                   } else if (call.name === 'saveNote') {
                     const args = call.args as any;

@@ -1,3 +1,44 @@
+export type ActivityLogEntryInput = {
+  appName?: string;
+  pageTitle?: string;
+  url?: string;
+  summary?: string;
+  details?: string;
+};
+
+function cleanField(value?: string | null): string {
+  return (value || '').trim();
+}
+
+export function formatActivityLogEntry(entry: ActivityLogEntryInput, timestamp: string): string {
+  const appName = cleanField(entry.appName) || 'Unknown app';
+  const summary = cleanField(entry.summary) || cleanField(entry.details) || 'Activity recorded';
+  const pageTitle = cleanField(entry.pageTitle);
+  const url = cleanField(entry.url);
+  const details = cleanField(entry.details);
+
+  const lines = [
+    `### [${timestamp}] ${summary}`,
+    '',
+    `- **App:** ${appName}`,
+  ];
+
+  if (pageTitle) {
+    lines.push(`- **Page:** ${pageTitle}`);
+  }
+
+  if (url) {
+    lines.push(`- **URL:** <${url}>`);
+  }
+
+  if (details) {
+    lines.push(`- **Details:** ${details}`);
+  }
+
+  lines.push('', '---', '');
+  return `${lines.join('\n')}\n`;
+}
+
 export function mergeIncrementalTranscript(existing: string, incoming?: string): string {
   if (!incoming) {
     return existing;
