@@ -29,7 +29,7 @@ function SectionHeading({
   subtitle?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const inView = useInView(ref, { once: true, margin: '-80px' });
+  const inView = useInView(ref, { once: true, margin: '100px' });
 
   return (
     <motion.div
@@ -59,33 +59,33 @@ function SectionHeading({
 const features = [
   {
     icon: Eye,
-    title: 'Screen Awareness',
-    body: 'Sees what you see. BrowserBud watches your screen and understands context\u00a0\u2014 no copy-pasting needed.',
+    title: 'Sees What You See',
+    body: 'BrowserBud watches your screen in real time and understands context\u00a0\u2014 no copy-pasting, no explaining what you\u2019re looking at.',
   },
   {
     icon: PenTool,
-    title: 'Smart Notes',
-    body: 'Automatically captures key information, questions, and recommendations as you browse.',
+    title: 'Notes You\u2019d Forget to Take',
+    body: 'Key facts, links, and insights get captured automatically as you browse. Just focus on the work.',
   },
   {
     icon: Mic,
-    title: 'Voice Conversation',
-    body: 'Talk naturally. Ask questions, get answers, and have discussions about what you\u2019re looking at.',
+    title: 'Talk, Don\u2019t Type',
+    body: 'Ask questions out loud and get answers about whatever\u2019s on screen. Like thinking with a smart coworker.',
   },
   {
     icon: Activity,
-    title: 'Activity Logging',
-    body: 'Keeps a running log of your browsing activity\u00a0\u2014 what you looked at, when, and key takeaways.',
+    title: 'Your Browsing, Logged',
+    body: 'A quiet running record of what you looked at, when, and the key takeaways\u00a0\u2014 so nothing slips through the cracks.',
   },
   {
     icon: Globe,
-    title: 'Background Research',
-    body: 'Searches the web for relevant info about what you\u2019re viewing, without you asking.',
+    title: 'Research on Autopilot',
+    body: 'BrowserBud pulls in related info from the web about what you\u2019re viewing, before you even think to search.',
   },
   {
     icon: User,
-    title: 'Custom Personalities',
-    body: 'Choose from different companion styles or create your own\u00a0\u2014 from academic researcher to casual buddy.',
+    title: 'Pick Your Companion Style',
+    body: 'Academic researcher, casual explainer, or devil\u2019s advocate\u00a0\u2014 choose a personality that matches how you think.',
   },
 ];
 
@@ -101,7 +101,7 @@ function FeatureCard({
   index: number;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const inView = useInView(ref, { once: true, margin: '-60px' });
+  const inView = useInView(ref, { once: true, margin: '100px' });
 
   return (
     <motion.div
@@ -129,19 +129,19 @@ const steps = [
     num: '01',
     icon: Monitor,
     title: 'Share your screen',
-    body: 'Click to share a browser tab or your entire screen.',
+    body: 'One click to share a tab or your whole screen. That\u2019s all BrowserBud needs.',
   },
   {
     num: '02',
     icon: Sparkles,
-    title: 'Choose a companion',
-    body: 'Pick a personality that matches your work style.',
+    title: 'Pick a companion',
+    body: 'Choose a personality\u00a0\u2014 or make your own\u00a0\u2014 that fits how you like to work.',
   },
   {
     num: '03',
     icon: ArrowRight,
-    title: 'Start working',
-    body: 'BrowserBud watches, listens, and helps in the background.',
+    title: 'Go do your thing',
+    body: 'BrowserBud watches, takes notes, and chimes in when it\u2019s helpful. You stay in flow.',
   },
 ];
 
@@ -159,7 +159,7 @@ function Step({
   index: number;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const inView = useInView(ref, { once: true, margin: '-60px' });
+  const inView = useInView(ref, { once: true, margin: '100px' });
 
   return (
     <motion.div
@@ -196,23 +196,23 @@ function Step({
 const useCases = [
   {
     icon: Search,
-    title: 'Research sessions',
-    body: 'Never lose a useful link or insight again.',
+    title: 'Deep research',
+    body: 'Every useful link, quote, and insight gets saved automatically. No more lost tabs.',
   },
   {
     icon: BookOpen,
-    title: 'Learning new topics',
-    body: 'Get real-time explanations of what you\u2019re reading.',
+    title: 'Learning something new',
+    body: 'Get plain-language explanations of what you\u2019re reading, right when you need them.',
   },
   {
     icon: List,
     title: 'Work documentation',
-    body: 'Automatic meeting notes and activity logs.',
+    body: 'Meeting notes, activity logs, and daily summaries\u00a0\u2014 written for you while you focus.',
   },
   {
     icon: Globe,
-    title: 'Browsing discovery',
-    body: 'Surface connections and related info you\u2019d miss.',
+    title: 'Serendipity mode',
+    body: 'BrowserBud surfaces connections and related info you\u2019d never think to search for.',
   },
 ];
 
@@ -228,7 +228,7 @@ function UseCaseCard({
   index: number;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const inView = useInView(ref, { once: true, margin: '-60px' });
+  const inView = useInView(ref, { once: true, margin: '100px' });
 
   return (
     <motion.div
@@ -276,7 +276,7 @@ export default function Landing() {
             <a href="#use-cases" className="hover:text-stone-900 transition-colors">Use Cases</a>
           </div>
           <a
-            href="#"
+            href="#/app"
             className="hidden sm:inline-flex items-center gap-1.5 rounded-full bg-teal-600 px-5 py-2 text-sm font-medium text-white shadow-sm shadow-teal-600/20 hover:bg-teal-700 transition-colors"
           >
             Try It Now
@@ -294,7 +294,7 @@ export default function Landing() {
           transition={{ duration: 0.6 }}
         >
           <span className="inline-flex items-center gap-1.5 rounded-full bg-teal-50 px-4 py-1.5 text-xs font-semibold text-teal-700 mb-8 ring-1 ring-teal-100">
-            <Sparkles size={13} /> Powered by Gemini Live API
+            <Sparkles size={13} /> Free to try &middot; Powered by Gemini
           </span>
         </motion.div>
 
@@ -304,9 +304,9 @@ export default function Landing() {
           transition={{ duration: 0.6, delay: 0.1 }}
           className="text-4xl sm:text-5xl md:text-6xl font-extrabold tracking-tight leading-[1.1] text-stone-900"
         >
-          Your smartest
+          A brilliant coworker
           <br className="hidden sm:block" />{' '}
-          browsing companion
+          who sees your screen
         </motion.h1>
 
         <motion.p
@@ -315,8 +315,8 @@ export default function Landing() {
           transition={{ duration: 0.6, delay: 0.2 }}
           className="mt-6 text-lg sm:text-xl text-stone-500 max-w-2xl mx-auto leading-relaxed"
         >
-          BrowserBud watches your screen, takes notes, surfaces helpful info, and
-          answers questions&nbsp;&mdash; all in the background while you work.
+          BrowserBud is an AI companion that watches your screen, takes smart notes,
+          and answers questions&nbsp;&mdash; all running quietly while you do your actual work.
         </motion.p>
 
         <motion.div
@@ -326,7 +326,7 @@ export default function Landing() {
           className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4"
         >
           <a
-            href="#"
+            href="#/app"
             className="inline-flex items-center gap-2 rounded-full bg-teal-600 px-7 py-3 text-[15px] font-semibold text-white shadow-md shadow-teal-600/20 hover:bg-teal-700 transition-colors"
           >
             Try It Now <ArrowRight size={16} />
@@ -346,8 +346,8 @@ export default function Landing() {
       <section id="features" className="max-w-6xl mx-auto px-6 py-24">
         <SectionHeading
           label="Features"
-          title="Everything you need, running quietly in the background"
-          subtitle="BrowserBud combines screen understanding, voice interaction, and intelligent note-taking into one seamless companion."
+          title="Everything happens in the background"
+          subtitle="Screen understanding, voice chat, and smart note-taking\u00a0\u2014 all working together so you don\u2019t have to."
         />
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
@@ -363,7 +363,7 @@ export default function Landing() {
       <section id="how-it-works" className="max-w-5xl mx-auto px-6 py-24">
         <SectionHeading
           label="How It Works"
-          title="Up and running in three clicks"
+          title="Three clicks to your new favorite coworker"
         />
 
         <div className="flex flex-col lg:flex-row gap-12 lg:gap-8">
@@ -379,8 +379,8 @@ export default function Landing() {
       <section id="use-cases" className="max-w-4xl mx-auto px-6 py-24">
         <SectionHeading
           label="Use Cases"
-          title="Built for how you actually work"
-          subtitle="Whether you're researching, learning, or documenting, BrowserBud adapts to your workflow."
+          title="Built for how you actually browse"
+          subtitle="Whether you\u2019re deep in research, learning something new, or just trying to stay on top of things."
         />
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
@@ -399,7 +399,7 @@ export default function Landing() {
             <Sparkles size={16} className="text-teal-600" />
             <span className="font-medium text-stone-500">BrowserBud</span>
             <span className="hidden sm:inline">&middot;</span>
-            <span>Built with Gemini Live API</span>
+            <span>Powered by Gemini</span>
           </div>
           <div className="flex items-center gap-6">
             <a href="#features" className="hover:text-stone-600 transition-colors">Features</a>
