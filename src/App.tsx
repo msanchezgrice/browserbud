@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { GoogleGenAI, Modality, Type } from '@google/genai';
+import { FunctionCallingConfigMode, GoogleGenAI, Modality, Type } from '@google/genai';
 import { Play, Square, Mic, MicOff, User, Clock, MessageSquare, Monitor, MonitorOff, Info, Plus, Trash2, RotateCcw, Settings, Search, FileText, BookOpen, List, Bookmark } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { formatLatency, mergeIncrementalTranscript, truncateSessionHandle } from './liveUtils';
 
 const apiKey = process.env.GEMINI_API_KEY;
-const ai = new GoogleGenAI({ apiKey });
+const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
 
 const STORAGE_KEYS = {
@@ -17,6 +18,7 @@ const STORAGE_KEYS = {
 };
 
 const MAX_RECONNECT_ATTEMPTS = 6;
+const AUTO_COMMENTARY_USER_COOLDOWN_MS = 15000;
 
 const readStoredText = (key: string) => {
   try {
@@ -46,17 +48,55 @@ const DEFAULT_PERSONALITIES: Personality[] = [
 const AVAILABLE_VOICES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'];
 
 const FREQUENCIES = [
+  { id: 0, name: 'Off (Conversation Only)' },
   { id: 10000, name: 'Every 10 seconds' },
   { id: 30000, name: 'Every 30 seconds' },
   { id: 60000, name: 'Every 1 minute' },
-  { id: 0, name: 'Off (Conversation Only)' },
 ];
+
+type AppTab = 'transcript' | 'info' | 'activity' | 'notes';
 
 type LogEntry = {
   id: string;
   timestamp: Date;
   text: string;
   role: 'user' | 'model' | 'system';
+};
+
+type DebugState = {
+  currentSessionHandle: string | null;
+  firstAudioLatencyMs: number | null;
+  reconnectAttempts: number;
+  lastReconnectReason: string | null;
+  lastReconnectAt: string | null;
+  lastAutoCommentaryAt: string | null;
+};
+
+const TAB_METADATA: Record<AppTab, { label: string; toolName: string; description: string; emptyState: string; }> = {
+  transcript: {
+    label: 'Live Transcript',
+    toolName: 'Automatic transcript',
+    description: 'Full user and companion turns are assembled from streaming transcription events.',
+    emptyState: 'No transcript yet. Share your screen and click Start Companion to begin.',
+  },
+  info: {
+    label: 'Helpful Info',
+    toolName: 'Tool: appendHelpfulInfo',
+    description: 'Reusable advice, links, and takeaways saved for later.',
+    emptyState: 'No helpful info yet. Ask the companion to save something useful to the Helpful Info tab.',
+  },
+  activity: {
+    label: 'Activity Log',
+    toolName: 'Tool: logActivity',
+    description: 'Meaningful task and page changes are summarized here.',
+    emptyState: 'No activity logged yet. Ask the companion to log what you are doing.',
+  },
+  notes: {
+    label: 'Saved Notes',
+    toolName: 'Tool: saveNote',
+    description: 'Direct reminders, todos, and remember-this requests land here.',
+    emptyState: 'No notes saved yet. Say add a note or remember this to trigger saveNote.',
+  },
 };
 
 export default function App() {
@@ -71,7 +111,7 @@ export default function App() {
   });
 
   const [personality, setPersonality] = useState(personas[0].id);
-  const [frequency, setFrequency] = useState(FREQUENCIES[1].id); // Default to 30s
+  const [frequency, setFrequency] = useState(0);
   const [isSharing, setIsSharing] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [isMicMuted, setIsMicMuted] = useState(false);
@@ -79,7 +119,7 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
   // Notepad State
-  const [activeTab, setActiveTab] = useState<'transcript' | 'info' | 'activity' | 'notes'>('transcript');
+  const [activeTab, setActiveTab] = useState<AppTab>('transcript');
   const [helpfulInfo, setHelpfulInfo] = useState<string>(() => readStoredText(STORAGE_KEYS.helpfulInfo));
   const [activityLog, setActivityLog] = useState<string>(() => readStoredText(STORAGE_KEYS.activityLog));
   const [savedNotes, setSavedNotes] = useState<string>(() => readStoredText(STORAGE_KEYS.savedNotes));
@@ -90,6 +130,17 @@ export default function App() {
   const [newPersonaPrompt, setNewPersonaPrompt] = useState('');
   const [newPersonaVoice, setNewPersonaVoice] = useState(AVAILABLE_VOICES[0]);
   const [newPersonaSearch, setNewPersonaSearch] = useState(false);
+  const [sessionSearchEnabled, setSessionSearchEnabled] = useState(Boolean(personas[0]?.useSearch));
+  const [debugState, setDebugState] = useState<DebugState>({
+    currentSessionHandle: null,
+    firstAudioLatencyMs: null,
+    reconnectAttempts: 0,
+    lastReconnectReason: null,
+    lastReconnectAt: null,
+    lastAutoCommentaryAt: null,
+  });
+
+  const selectedPersonality = personas.find((option) => option.id === personality) || personas[0];
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -99,7 +150,9 @@ export default function App() {
   const playCtxRef = useRef<AudioContext | null>(null);
   const micCtxRef = useRef<AudioContext | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const micSinkRef = useRef<GainNode | null>(null);
+  const processorRef = useRef<AudioWorkletNode | null>(null);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const nextPlayTimeRef = useRef<number>(0);
   const isMicMutedRef = useRef(isMicMuted);
@@ -113,14 +166,26 @@ export default function App() {
   const isStartingRef = useRef(false);
   const isStoppingRef = useRef(false);
   const isUnmountingRef = useRef(false);
+  const pendingTurnRef = useRef(false);
+  const pendingToolCallRef = useRef(false);
+  const lastUserActivityAtRef = useRef(0);
+  const lastPromptAtRef = useRef(0);
+  const sessionStartTimeRef = useRef<number | null>(null);
+  const firstAudioChunkSeenRef = useRef(false);
   
   // Interval Refs
-  const videoIntervalRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
-  const commentaryIntervalRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
+  const videoIntervalRef = useRef<number | null>(null);
+  const commentaryIntervalRef = useRef<number | null>(null);
 
   useEffect(() => {
     isMicMutedRef.current = isMicMuted;
   }, [isMicMuted]);
+
+  useEffect(() => {
+    if (!isRunning) {
+      setSessionSearchEnabled(Boolean(selectedPersonality?.useSearch));
+    }
+  }, [isRunning, selectedPersonality]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.helpfulInfo, helpfulInfo);
@@ -286,6 +351,46 @@ export default function App() {
     }
   };
 
+  const sendSessionPrompt = (text: string, { isAuto = false }: { isAuto?: boolean } = {}) => {
+    const pendingSession = sessionRef.current;
+    if (!pendingSession) {
+      return;
+    }
+
+    pendingTurnRef.current = true;
+    lastPromptAtRef.current = Date.now();
+
+    if (isAuto) {
+      setDebugState((prev) => ({
+        ...prev,
+        lastAutoCommentaryAt: new Date().toLocaleTimeString(),
+      }));
+    }
+
+    void pendingSession.then((session) => {
+      session.sendClientContent({ turns: text, turnComplete: true });
+    }).catch(() => {});
+  };
+
+  const maybeTriggerAutoCommentary = () => {
+    if (frequency <= 0) {
+      return;
+    }
+
+    const now = Date.now();
+    if (isModelSpeakingRef.current || pendingTurnRef.current || pendingToolCallRef.current || reconnectTimeoutRef.current) {
+      return;
+    }
+    if (now - lastUserActivityAtRef.current < AUTO_COMMENTARY_USER_COOLDOWN_MS) {
+      return;
+    }
+    if (now - lastPromptAtRef.current < AUTO_COMMENTARY_USER_COOLDOWN_MS) {
+      return;
+    }
+
+    sendSessionPrompt('Analyze the current screen and provide a brief spoken commentary only if something meaningfully changed or stands out. Use tools only when there is genuinely useful information worth saving.', { isAuto: true });
+  };
+
   const cleanupLiveSession = ({ closeSession = false, stopMic = true }: { closeSession?: boolean; stopMic?: boolean } = {}) => {
     clearRuntimeTimers();
 
@@ -296,13 +401,28 @@ export default function App() {
     });
     activeSourcesRef.current = [];
     isModelSpeakingRef.current = false;
+    pendingTurnRef.current = false;
+    pendingToolCallRef.current = false;
     currentInputTranscriptRef.current = '';
     currentOutputTranscriptRef.current = '';
+    lastPromptAtRef.current = 0;
+    firstAudioChunkSeenRef.current = false;
+    sessionStartTimeRef.current = null;
 
     if (processorRef.current) {
-      processorRef.current.onaudioprocess = null;
+      processorRef.current.port.onmessage = null;
       processorRef.current.disconnect();
       processorRef.current = null;
+    }
+
+    if (micSourceRef.current) {
+      micSourceRef.current.disconnect();
+      micSourceRef.current = null;
+    }
+
+    if (micSinkRef.current) {
+      micSinkRef.current.disconnect();
+      micSinkRef.current = null;
     }
 
     if (stopMic && micStreamRef.current) {
@@ -342,6 +462,12 @@ export default function App() {
         text: 'Live connection could not be restored after several attempts.',
         role: 'system'
       }, ...prev]);
+      setDebugState((prev) => ({
+        ...prev,
+        reconnectAttempts: reconnectAttemptsRef.current,
+        lastReconnectReason: reason,
+        lastReconnectAt: new Date().toLocaleTimeString(),
+      }));
       return;
     }
 
@@ -354,6 +480,12 @@ export default function App() {
       text: `Live connection dropped (${reason}). Reconnecting in ${Math.round(delayMs / 1000)}s...`,
       role: 'system'
     }, ...prev]);
+    setDebugState((prev) => ({
+      ...prev,
+      reconnectAttempts: reconnectAttemptsRef.current,
+      lastReconnectReason: reason,
+      lastReconnectAt: new Date().toLocaleTimeString(),
+    }));
 
     reconnectTimeoutRef.current = window.setTimeout(() => {
       reconnectTimeoutRef.current = null;
@@ -371,8 +503,8 @@ export default function App() {
       return;
     }
 
-    if (!apiKey) {
-      alert('Missing GEMINI_API_KEY. Add it to .env.local and restart the dev server.');
+    if (!apiKey || !ai) {
+      alert('Missing GEMINI_API_KEY. Add it to your environment and restart the app.');
       return;
     }
 
@@ -388,6 +520,13 @@ export default function App() {
     }
 
     cleanupLiveSession({ closeSession: false, stopMic: true });
+    sessionStartTimeRef.current = performance.now();
+    firstAudioChunkSeenRef.current = false;
+    setDebugState((prev) => ({
+      ...prev,
+      firstAudioLatencyMs: null,
+      reconnectAttempts: reconnectAttemptsRef.current,
+    }));
 
     try {
       const micStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
@@ -399,12 +538,29 @@ export default function App() {
 
       void playCtxRef.current.resume().catch(() => {});
       void micCtxRef.current.resume().catch(() => {});
+      await micCtxRef.current.audioWorklet.addModule('/pcm-recorder-worklet.js');
 
       nextPlayTimeRef.current = playCtxRef.current.currentTime;
-      console.debug('Starting live session', { model: LIVE_MODEL, isReconnect });
+      console.debug('Starting live session', { model: LIVE_MODEL, isReconnect, searchEnabled: sessionSearchEnabled });
 
-      const currentPersonality = personas.find((p) => p.id === personality) || personas[0];
       let currentTurnText = '';
+      const commitModelTurn = (suffix = '') => {
+        const transcriptText = currentOutputTranscriptRef.current.trim();
+        const fallbackText = currentTurnText.trim();
+        const finalText = transcriptText || fallbackText;
+        if (finalText) {
+          setLogs((prev) => [{
+            id: Math.random().toString(36).substring(7),
+            timestamp: new Date(),
+            text: `${finalText}${suffix}`.trim(),
+            role: 'model'
+          }, ...prev]);
+        }
+        currentTurnText = '';
+        currentOutputTranscriptRef.current = '';
+        pendingTurnRef.current = false;
+        pendingToolCallRef.current = false;
+      };
 
       const config: any = {
         responseModalities: [Modality.AUDIO],
@@ -414,61 +570,69 @@ export default function App() {
         contextWindowCompression: { slidingWindow: {} },
         sessionResumption: { handle: sessionHandleRef.current || undefined },
         systemInstruction: {
-          parts: [{ text: `${currentPersonality.prompt} You can see the user's screen and hear their voice. Respond to them naturally and conversationally. Keep your answers brief.
+          parts: [{ text: `${selectedPersonality.prompt} You can see the user's screen and hear their voice. Respond naturally and keep spoken replies brief.
 
-IMPORTANT: Prioritize a fast spoken reply first. Use tools only when they add clear value, and do not delay an initial response just to write notes.
-- Use 'appendHelpfulInfo' after responding when a recommendation is worth saving for later.
-- Use 'logActivity' only for meaningful changes in what the user is doing, not every turn.
-- Use 'saveNote' when the user explicitly asks you to save something or remember a question.
-- Use 'googleSearch' (if enabled) only for factual or up-to-date questions where grounding helps.` }]
+Tool rules:
+- The Helpful Info tab stores reusable recommendations, links, and takeaways. If the user asks you to save something useful for later, call appendHelpfulInfo in this turn.
+- The Activity Log tab stores concise records of meaningful task changes. Call logActivity when the user explicitly asks for it or when there is a clear task/page change worth recording.
+- The Saved Notes tab stores direct reminders, todos, and remember-this requests. If the user says add a note, save this, or remember this, you must call saveNote in this turn before you finish responding.
+- Do not use tools on every turn.
+- Prioritize clean, complete spoken responses over fragmented quick replies.` }]
         },
         speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: currentPersonality.voiceName } }
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedPersonality.voiceName } }
         },
         tools: [{
           functionDeclarations: [
             {
               name: 'appendHelpfulInfo',
-              description: 'Append helpful information to the notepad. You MUST include a thinking trace explaining why this is helpful.',
+              description: 'Add reusable advice, links, facts, or recommendations to the Helpful Info tab.',
               parameters: {
                 type: Type.OBJECT,
                 properties: {
-                  thinking_trace: { type: Type.STRING, description: 'Explanation of why this information is helpful to the user right now.' },
-                  content: { type: Type.STRING, description: 'Markdown formatted content to append.' }
+                  title: { type: Type.STRING, description: 'Short title for the saved helpful info.' },
+                  content: { type: Type.STRING, description: 'Markdown formatted helpful content to append.' }
                 },
-                required: ['thinking_trace', 'content']
+                required: ['content']
               }
             },
             {
               name: 'logActivity',
-              description: 'Log minutes or notes of what the user is doing (location, topic). Appends to the activity log.',
+              description: 'Add a concise entry to the Activity Log tab describing a meaningful task or page change.',
               parameters: {
                 type: Type.OBJECT,
                 properties: {
-                  location: { type: Type.STRING, description: 'URL, App name, or context location' },
-                  topic: { type: Type.STRING, description: 'Main topic of the activity' },
-                  details: { type: Type.STRING, description: 'Brief details of what was done' }
+                  location: { type: Type.STRING, description: 'URL, app name, or context location.' },
+                  topic: { type: Type.STRING, description: 'Main topic of the activity.' },
+                  details: { type: Type.STRING, description: 'Brief details of what happened.' }
                 },
                 required: ['location', 'topic', 'details']
               }
             },
             {
               name: 'saveNote',
-              description: 'Log any asked questions or requested notes from the user. Appends to the saved notes notepad.',
+              description: 'Add a short reminder, quote, or requested note to the Saved Notes tab.',
               parameters: {
                 type: Type.OBJECT,
-                properties: { note: { type: Type.STRING, description: 'The question or note to save' } },
+                properties: {
+                  note: { type: Type.STRING, description: 'The note or reminder to save.' }
+                },
                 required: ['note']
               }
             }
           ]
-        }]
+        }],
+        toolConfig: {
+          functionCallingConfig: { mode: FunctionCallingConfigMode.AUTO },
+        }
       };
 
-      if (currentPersonality.useSearch) {
+      if (sessionSearchEnabled) {
         config.tools.push({ googleSearch: {} });
-        config.systemInstruction.parts[0].text += ' Use Google Search to find relevant information about what the user is looking at if needed.';
-        config.toolConfig = { includeServerSideToolInvocations: true };
+        config.systemInstruction.parts[0].text += '\n- Google Search is enabled for this session. Use it only for factual or time-sensitive questions where grounding helps.';
+        config.toolConfig.includeServerSideToolInvocations = true;
+      } else {
+        config.systemInstruction.parts[0].text += '\n- Google Search is disabled for this session. Answer from the visible context unless the user explicitly asks you to search later.';
       }
 
       const sessionPromise = ai.live.connect({
@@ -480,21 +644,39 @@ IMPORTANT: Prioritize a fast spoken reply first. Use tools only when they add cl
             reconnectAttemptsRef.current = 0;
             setErrorMsg(null);
             setIsRunning(true);
+            setDebugState((prev) => ({
+              ...prev,
+              reconnectAttempts: 0,
+              lastReconnectAt: isReconnect ? new Date().toLocaleTimeString() : prev.lastReconnectAt,
+            }));
 
             const source = micCtxRef.current!.createMediaStreamSource(micStream);
-            const processor = micCtxRef.current!.createScriptProcessor(2048, 1, 1);
+            const processor = new AudioWorkletNode(micCtxRef.current!, 'pcm-recorder-processor', {
+              numberOfInputs: 1,
+              numberOfOutputs: 1,
+              outputChannelCount: [1],
+              channelCount: 1,
+              processorOptions: { chunkSize: 2048 },
+            });
+            const sink = micCtxRef.current!.createGain();
+            sink.gain.value = 0;
+
+            micSourceRef.current = source;
+            micSinkRef.current = sink;
             processorRef.current = processor;
 
             source.connect(processor);
-            processor.connect(micCtxRef.current!.destination);
+            processor.connect(sink);
+            sink.connect(micCtxRef.current!.destination);
 
-            processor.onaudioprocess = (e) => {
-              if (isMicMutedRef.current) return;
-              const inputData = e.inputBuffer.getChannelData(0);
+            processor.port.onmessage = (event) => {
+              if (isMicMutedRef.current) {
+                return;
+              }
 
-              const outputData = e.outputBuffer.getChannelData(0);
-              for (let i = 0; i < outputData.length; i++) {
-                outputData[i] = 0;
+              const inputData = event.data;
+              if (!(inputData instanceof Float32Array)) {
+                return;
               }
 
               const pcm16 = new Int16Array(inputData.length);
@@ -514,7 +696,7 @@ IMPORTANT: Prioritize a fast spoken reply first. Use tools only when they add cl
               }).catch(() => {});
             };
 
-            videoIntervalRef.current = setInterval(() => {
+            videoIntervalRef.current = window.setInterval(() => {
               const base64Image = captureFrame();
               if (base64Image) {
                 sessionPromise.then((session) => {
@@ -524,19 +706,15 @@ IMPORTANT: Prioritize a fast spoken reply first. Use tools only when they add cl
             }, 2000);
 
             if (frequency > 0) {
-              commentaryIntervalRef.current = setInterval(() => {
-                if (!isModelSpeakingRef.current) {
-                  sessionPromise.then((session) => {
-                    session.sendRealtimeInput({ text: 'Analyze the current screen and provide a brief spoken commentary if something changed or stands out. Only use tools if there is genuinely useful information worth saving.' });
-                  }).catch(() => {});
-                }
+              commentaryIntervalRef.current = window.setInterval(() => {
+                maybeTriggerAutoCommentary();
               }, frequency);
             }
 
             setLogs((prev) => [{
               id: Math.random().toString(36).slice(2),
               timestamp: new Date(),
-              text: isReconnect ? 'Live audio reconnected.' : 'Connected to Live Audio. You can talk now!',
+              text: isReconnect ? 'Live audio reconnected. You can keep talking.' : 'Connected to Live Audio. You can talk now!',
               role: 'system'
             }, ...prev]);
           },
@@ -545,8 +723,12 @@ IMPORTANT: Prioritize a fast spoken reply first. Use tools only when they add cl
             const outputTranscription = message.serverContent?.outputTranscription;
             const sessionResumptionUpdate = message.sessionResumptionUpdate;
 
-            if (sessionResumptionUpdate?.resumable && sessionResumptionUpdate?.newHandle) {
+            if (sessionResumptionUpdate?.resumable && sessionResumptionUpdate?.newHandle && sessionResumptionUpdate.newHandle !== sessionHandleRef.current) {
               sessionHandleRef.current = sessionResumptionUpdate.newHandle;
+              setDebugState((prev) => ({
+                ...prev,
+                currentSessionHandle: sessionResumptionUpdate.newHandle,
+              }));
             }
 
             const shouldLogEvent =
@@ -578,7 +760,9 @@ IMPORTANT: Prioritize a fast spoken reply first. Use tools only when they add cl
             }
 
             if (inputTranscription?.text !== undefined) {
-              currentInputTranscriptRef.current = inputTranscription.text;
+              lastUserActivityAtRef.current = Date.now();
+              pendingTurnRef.current = true;
+              currentInputTranscriptRef.current = mergeIncrementalTranscript(currentInputTranscriptRef.current, inputTranscription.text);
             }
             if (inputTranscription?.finished && currentInputTranscriptRef.current.trim()) {
               const text = currentInputTranscriptRef.current.trim();
@@ -587,38 +771,33 @@ IMPORTANT: Prioritize a fast spoken reply first. Use tools only when they add cl
             }
 
             const parts = message.serverContent?.modelTurn?.parts;
-            if (parts) {
+            if (parts?.length) {
+              pendingTurnRef.current = true;
               isModelSpeakingRef.current = true;
               for (const part of parts) {
                 if (part?.text) {
                   currentTurnText += part.text;
                 }
                 if (part?.inlineData?.data) {
+                  if (!firstAudioChunkSeenRef.current && sessionStartTimeRef.current !== null) {
+                    firstAudioChunkSeenRef.current = true;
+                    setDebugState((prev) => ({
+                      ...prev,
+                      firstAudioLatencyMs: performance.now() - sessionStartTimeRef.current!,
+                    }));
+                  }
                   playAudioChunk(part.inlineData.data);
                 }
               }
             }
 
             if (outputTranscription?.text !== undefined) {
-              currentOutputTranscriptRef.current = outputTranscription.text;
-            }
-            if (outputTranscription?.finished && currentOutputTranscriptRef.current.trim()) {
-              const text = currentOutputTranscriptRef.current.trim();
-              setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text, role: 'model' }, ...prev]);
-              currentOutputTranscriptRef.current = '';
-              currentTurnText = '';
+              currentOutputTranscriptRef.current = mergeIncrementalTranscript(currentOutputTranscriptRef.current, outputTranscription.text);
             }
 
             if (message.serverContent?.turnComplete) {
               isModelSpeakingRef.current = false;
-              const transcriptText = currentOutputTranscriptRef.current.trim();
-              const fallbackText = currentTurnText.trim();
-              const finalText = transcriptText || fallbackText;
-              if (finalText) {
-                setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: finalText, role: 'model' }, ...prev]);
-              }
-              currentTurnText = '';
-              currentOutputTranscriptRef.current = '';
+              commitModelTurn();
             }
 
             if (message.serverContent?.interrupted) {
@@ -628,53 +807,51 @@ IMPORTANT: Prioritize a fast spoken reply first. Use tools only when they add cl
               if (playCtxRef.current) {
                 nextPlayTimeRef.current = playCtxRef.current.currentTime;
               }
-              if (currentTurnText.trim()) {
-                const interruptedText = `${currentTurnText.trim()} [Interrupted]`;
-                setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: interruptedText, role: 'model' }, ...prev]);
-                currentTurnText = '';
-              }
-              currentOutputTranscriptRef.current = '';
+              commitModelTurn(' [Interrupted]');
             }
 
             if (message.toolCall) {
+              pendingToolCallRef.current = true;
+              pendingTurnRef.current = true;
               const functionCalls = message.toolCall.functionCalls;
               if (functionCalls) {
                 const functionResponses: any[] = [];
                 for (const call of functionCalls) {
-                  setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: `[Action]: Executing ${call.name}...`, role: 'system' }, ...prev]);
+                  const timestamp = new Date().toLocaleTimeString();
 
-                  if (call.name === 'appendHelpfulInfo' || call.name === 'updateHelpfulInfo') {
+                  if (call.name === 'appendHelpfulInfo') {
                     const args = call.args as any;
-                    const timestamp = new Date().toLocaleTimeString();
-                    const infoEntry = `### [${timestamp}] Recommendation
-**Thinking Trace:** ${args.thinking_trace || 'Thought this would be useful.'}
-
-${args.content}
-
----
-
-`;
+                    const title = args.title?.trim();
+                    const heading = title ? `### [${timestamp}] ${title}` : `### [${timestamp}] Helpful Info`;
+                    const infoEntry = `${heading}\n\n${args.content}\n\n---\n\n`;
                     setHelpfulInfo((prev) => infoEntry + prev);
+                    setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Added helpful info to the Helpful Info tab.', role: 'system' }, ...prev]);
                     functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
                   } else if (call.name === 'logActivity') {
                     const args = call.args as any;
-                    const timestamp = new Date().toLocaleTimeString();
-                    const logEntry = `- **[${timestamp}] ${args.location}** (${args.topic}): ${args.details}
-`;
+                    const logEntry = `- **[${timestamp}] ${args.location}** (${args.topic}): ${args.details}\n`;
                     setActivityLog((prev) => logEntry + prev);
+                    setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Logged activity to the Activity Log tab.', role: 'system' }, ...prev]);
                     functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
                   } else if (call.name === 'saveNote') {
                     const args = call.args as any;
-                    const timestamp = new Date().toLocaleTimeString();
-                    const noteEntry = `- **[${timestamp}]** ${args.note}
-`;
+                    const noteEntry = `- **[${timestamp}]** ${args.note}\n`;
                     setSavedNotes((prev) => noteEntry + prev);
+                    setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Saved note to the Saved Notes tab.', role: 'system' }, ...prev]);
                     functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
                   }
                 }
-                sessionPromise.then((session) => {
-                  session.sendToolResponse({ functionResponses });
-                }).catch(() => {});
+
+                if (functionResponses.length) {
+                  sessionPromise.then((session) => {
+                    session.sendToolResponse({ functionResponses });
+                    pendingToolCallRef.current = false;
+                  }).catch(() => {
+                    pendingToolCallRef.current = false;
+                  });
+                } else {
+                  pendingToolCallRef.current = false;
+                }
               }
             }
           },
@@ -720,6 +897,7 @@ ${args.content}
       isStartingRef.current = false;
     }
   };
+
 
   const stopLive = () => {
     shouldStayConnectedRef.current = false;
@@ -929,6 +1107,32 @@ ${args.content}
                   <option key={f.id} value={f.id}>{f.name}</option>
                 ))}
               </select>
+              <p className="text-xs text-stone-500">
+                Off is the most reliable mode for voice requests. Timed commentary only runs after a short user-silence cooldown now.
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <label className="text-sm font-medium text-stone-700 flex items-center gap-2">
+                <Search className="w-4 h-4 text-stone-400" />
+                Google Search Grounding
+              </label>
+              <label className="flex items-center gap-3 rounded-lg border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={sessionSearchEnabled}
+                  onChange={(e) => setSessionSearchEnabled(e.target.checked)}
+                  disabled={isRunning}
+                  className="rounded border-stone-300 bg-white text-teal-600 focus:ring-teal-500"
+                />
+                <span className="flex-1">Enable search for this session</span>
+                <span className={`text-xs font-medium ${sessionSearchEnabled ? 'text-teal-600' : 'text-stone-400'}`}>
+                  {sessionSearchEnabled ? 'ON' : 'OFF'}
+                </span>
+              </label>
+              <p className="text-xs text-stone-500">
+                Grounding helps with factual lookups, but it adds latency. You can change this before starting the companion.
+              </p>
             </div>
 
             {/* Controls */}
@@ -971,31 +1175,49 @@ ${args.content}
 
           {/* Tabs Header */}
           <div className="px-4 pt-4 border-b border-stone-200 bg-white flex flex-col gap-4 z-10">
-            <div className="flex items-center justify-between px-2">
-              <div className="flex items-center gap-4">
-                <div className={`flex items-center gap-2 text-xs font-medium px-2.5 py-1 rounded-full border ${
-                  isRunning ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-stone-100 text-stone-500 border-stone-200'
-                }`}>
-                  <div className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'}`} />
-                  {isRunning ? 'LIVE' : 'OFFLINE'}
-                </div>
+            <div className="flex flex-col gap-3 px-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-4">
+                  <div className={`flex items-center gap-2 text-xs font-medium px-2.5 py-1 rounded-full border ${
+                    isRunning ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-stone-100 text-stone-500 border-stone-200'
+                  }`}>
+                    <div className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'}`} />
+                    {isRunning ? 'LIVE' : 'OFFLINE'}
+                  </div>
 
-                <button
-                  onClick={() => {
-                    if (sessionRef.current) {
-                      sessionRef.current.then(session => {
-                        session.sendRealtimeInput({ text: "Provide a brief commentary on what is happening on the screen right now." });
-                      });
-                    }
-                  }}
-                  disabled={!isRunning}
-                  className="text-xs bg-stone-100 hover:bg-stone-200 text-stone-600 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
-                >
-                  Force Comment
-                </button>
+                  <button
+                    onClick={() => sendSessionPrompt('Provide a brief commentary on what is happening on the screen right now.')}
+                    disabled={!isRunning}
+                    className="text-xs bg-stone-100 hover:bg-stone-200 text-stone-600 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    Force Comment
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
+                <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Session Handle</div>
+                  <div className="mt-1 text-sm font-medium text-stone-700 font-mono">{truncateSessionHandle(debugState.currentSessionHandle)}</div>
+                </div>
+                <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">First Audio</div>
+                  <div className="mt-1 text-sm font-medium text-stone-700">{formatLatency(debugState.firstAudioLatencyMs)}</div>
+                </div>
+                <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Last Reconnect</div>
+                  <div className="mt-1 text-sm font-medium text-stone-700">{debugState.lastReconnectAt || 'None'}</div>
+                  <div className="text-xs text-stone-500">{debugState.lastReconnectReason || 'No reconnects yet'}</div>
+                </div>
+                <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Session Debug</div>
+                  <div className="mt-1 text-sm font-medium text-stone-700">Search {sessionSearchEnabled ? 'ON' : 'OFF'}</div>
+                  <div className="text-xs text-stone-500">
+                    {debugState.lastAutoCommentaryAt ? `Last auto comment ${debugState.lastAutoCommentaryAt}` : 'No auto commentary yet'}
+                  </div>
+                </div>
               </div>
             </div>
-
             <div className="flex gap-1 overflow-x-auto custom-scrollbar pb-2">
               <button
                 onClick={() => setActiveTab('transcript')}
@@ -1038,6 +1260,15 @@ ${args.content}
 
           {/* Tab Content */}
           <div className="flex-1 overflow-y-auto p-6 relative custom-scrollbar">
+            <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">{TAB_METADATA[activeTab].label}</div>
+                <p className="mt-1 text-sm text-stone-500">{TAB_METADATA[activeTab].description}</p>
+              </div>
+              <div className="rounded-full border border-stone-200 bg-stone-50 px-3 py-1 text-xs font-medium text-stone-500">
+                {TAB_METADATA[activeTab].toolName}
+              </div>
+            </div>
 
             {/* Transcript Tab */}
             {activeTab === 'transcript' && (
@@ -1083,7 +1314,7 @@ ${args.content}
                 {logs.length === 0 && (
                   <div className="flex-1 flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
                     <MessageSquare className="w-12 h-12 opacity-15" />
-                    <p>No transcript yet. Share your screen and click "Start Companion" to begin.</p>
+                    <p>{TAB_METADATA.transcript.emptyState}</p>
                   </div>
                 )}
               </div>
@@ -1099,7 +1330,7 @@ ${args.content}
                 ) : (
                   <div className="flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
                     <BookOpen className="w-12 h-12 opacity-15" />
-                    <p>No helpful info prepped yet. Ask the companion to prepare some information.</p>
+                    <p>{TAB_METADATA.info.emptyState}</p>
                   </div>
                 )}
               </div>
@@ -1115,7 +1346,7 @@ ${args.content}
                 ) : (
                   <div className="flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
                     <List className="w-12 h-12 opacity-15" />
-                    <p>No activity logged yet. Ask the companion to take minutes of what you are doing.</p>
+                    <p>{TAB_METADATA.activity.emptyState}</p>
                   </div>
                 )}
               </div>
@@ -1131,7 +1362,7 @@ ${args.content}
                 ) : (
                   <div className="flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
                     <Bookmark className="w-12 h-12 opacity-15" />
-                    <p>No notes saved yet. Ask the companion to log a question or save a note.</p>
+                    <p>{TAB_METADATA.notes.emptyState}</p>
                   </div>
                 )}
               </div>
