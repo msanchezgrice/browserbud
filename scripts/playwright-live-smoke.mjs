@@ -1,6 +1,7 @@
 import { chromium } from 'playwright';
 
-const appUrl = process.env.APP_URL || 'http://localhost:3010/';
+const rawAppUrl = process.env.APP_URL || 'http://localhost:3010';
+const appUrl = rawAppUrl.includes('#') ? rawAppUrl : `${rawAppUrl.replace(/\/$/, '')}/#/app`;
 
 const consoleEntries = [];
 const pageErrors = [];
@@ -108,8 +109,18 @@ await context.addInitScript(() => {
 try {
   const start = Date.now();
   await page.goto(appUrl, { waitUntil: 'domcontentloaded' });
+  await page.waitForLoadState('networkidle');
 
-  await page.getByRole('button', { name: 'Share Tab/Screen' }).click();
+  const shareButton = page.getByRole('button', { name: 'Share Tab/Screen' });
+  if (!(await shareButton.isVisible().catch(() => false))) {
+    const tryItNow = page.getByRole('link', { name: /Try It Now/i }).first();
+    if (await tryItNow.isVisible().catch(() => false)) {
+      await tryItNow.click();
+      await page.waitForLoadState('networkidle');
+    }
+  }
+
+  await shareButton.click();
   await page.waitForFunction(() => document.body.innerText.includes('Stop Sharing'));
 
   await page.getByRole('button', { name: 'Start Companion' }).click();
@@ -121,7 +132,6 @@ try {
   const connectedAt = Date.now();
 
   await page.getByTitle('Mute Microphone').click();
-
   await page.getByRole('button', { name: 'Force Comment' }).click();
   await sleep(12000);
 

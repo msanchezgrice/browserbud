@@ -1,8 +1,10 @@
-.env.local
-node_modules
-dist
-*.log
 
+*.log
 .claude/tsc-cache/
-.vercel
 .env*.local
+.env.dev-local
+.env.local
+.playwright-mcp/
+.vercel
+dist
+node_modules

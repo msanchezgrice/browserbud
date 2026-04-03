@@ -368,7 +368,7 @@ export default function App() {
     }
 
     void pendingSession.then((session) => {
-      session.sendClientContent({ turns: text, turnComplete: true });
+      session.sendRealtimeInput({ text });
     }).catch(() => {});
   };
 

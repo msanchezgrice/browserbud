@@ -10,7 +10,8 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "probe:live": "node scripts/live-probe.mjs",
-    "probe:browser": "node scripts/playwright-live-smoke.mjs"
+    "probe:browser": "node scripts/playwright-live-smoke.mjs",
+    "test:live-utils": "tsx --test tests/liveUtils.test.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
