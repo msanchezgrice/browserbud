@@ -276,7 +276,7 @@ export default function Landing() {
             <a href="#use-cases" className="hover:text-stone-900 transition-colors">Use Cases</a>
           </div>
           <a
-            href="#/app"
+            href="/app"
             className="hidden sm:inline-flex items-center gap-1.5 rounded-full bg-teal-600 px-5 py-2 text-sm font-medium text-white shadow-sm shadow-teal-600/20 hover:bg-teal-700 transition-colors"
           >
             Try It Now
@@ -326,7 +326,7 @@ export default function Landing() {
           className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4"
         >
           <a
-            href="#/app"
+            href="/app"
             className="inline-flex items-center gap-2 rounded-full bg-teal-600 px-7 py-3 text-[15px] font-semibold text-white shadow-md shadow-teal-600/20 hover:bg-teal-700 transition-colors"
           >
             Try It Now <ArrowRight size={16} />

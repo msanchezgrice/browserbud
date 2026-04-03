@@ -1,7 +1,9 @@
 import { chromium } from 'playwright';
 
 const rawAppUrl = process.env.APP_URL || 'http://localhost:3010';
-const appUrl = rawAppUrl.includes('#') ? rawAppUrl : `${rawAppUrl.replace(/\/$/, '')}/#/app`;
+const appUrl = rawAppUrl.includes('#') || /\/app(?:\/|$)/.test(rawAppUrl)
+  ? rawAppUrl
+  : `${rawAppUrl.replace(/\/$/, '')}/app`;
 
 const consoleEntries = [];
 const pageErrors = [];
