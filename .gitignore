@@ -4,3 +4,5 @@ dist
 *.log
 
 .claude/tsc-cache/
+.vercel
+.env*.local
