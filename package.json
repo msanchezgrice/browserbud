@@ -5,19 +5,22 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port=3010 --host=0.0.0.0",
+    "dev:api": "tsx watch server/index.ts",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "probe:live": "node scripts/live-probe.mjs",
     "probe:browser": "node scripts/playwright-live-smoke.mjs",
-    "test:live-utils": "tsx --test tests/liveUtils.test.ts"
+    "test:live-utils": "tsx --test tests/liveUtils.test.ts tests/autoSave.test.ts tests/runtimeSupport.test.ts",
+    "test:analytics": "tsx --test tests/analyticsStore.test.ts tests/analyticsApp.test.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
     "@tailwindcss/typography": "^0.5.19",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
+    "better-sqlite3": "^12.8.0",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "lucide-react": "^0.546.0",

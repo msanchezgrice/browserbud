@@ -4,7 +4,11 @@ import { Play, Square, Mic, MicOff, User, Clock, MessageSquare, Monitor, Monitor
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { formatActivityLogEntry, formatLatency, mergeIncrementalTranscript, truncateSessionHandle } from './liveUtils';
+import { DEFAULT_AUTO_SAVE_INTERVAL_MS, buildAutoSavePrompt } from './autoSave';
+import { completeAnalyticsSession, createAnalyticsSession, fetchAnalyticsSessionTimeline, fetchAnalyticsSessions, fetchLatestAnalyticsSessionTimeline, generateAnalyticsSessionRecap, recordAnalyticsEvent, recordAnalyticsMemory, recordAnalyticsTurn } from './analyticsApi';
+import type { AnalyticsMemoryInput, AnalyticsRawEventInput, AnalyticsSessionListItem, AnalyticsSessionTimeline } from './analyticsTypes';
+import { buildRehydratedSessionState, formatActivityLogEntry, formatLatency, mergeIncrementalTranscript, parseStoredLogEntries, serializeLogEntries, shouldCommitUserTranscript, shouldRunTimedBackgroundSave, truncateSessionHandle } from './liveUtils';
+import { getRuntimeSupport } from './runtimeSupport';
 
 const apiKey = process.env.GEMINI_API_KEY;
 const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
@@ -15,10 +19,12 @@ const STORAGE_KEYS = {
   helpfulInfo: 'browserbud.helpfulInfo',
   activityLog: 'browserbud.activityLog',
   savedNotes: 'browserbud.savedNotes',
+  transcriptLogs: 'browserbud.transcriptLogs',
 };
 
 const MAX_RECONNECT_ATTEMPTS = 6;
 const AUTO_COMMENTARY_USER_COOLDOWN_MS = 15000;
+const TIMED_COMMENTARY_PROMPT = 'Provide a brief spoken commentary on what is happening on the screen right now. Keep it under two sentences unless the user asked for more detail.';
 
 const readStoredText = (key: string) => {
   try {
@@ -48,13 +54,13 @@ const DEFAULT_PERSONALITIES: Personality[] = [
 const AVAILABLE_VOICES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'];
 
 const FREQUENCIES = [
-  { id: 0, name: 'Off (Conversation Only)' },
+  { id: 0, name: 'Off' },
   { id: 10000, name: 'Every 10 seconds' },
   { id: 30000, name: 'Every 30 seconds' },
   { id: 60000, name: 'Every 1 minute' },
 ];
 
-type AppTab = 'transcript' | 'info' | 'activity' | 'notes';
+type AppTab = 'transcript' | 'info' | 'activity' | 'notes' | 'history';
 
 type LogEntry = {
   id: string;
@@ -63,13 +69,24 @@ type LogEntry = {
   role: 'user' | 'model' | 'system';
 };
 
+const readStoredLogs = (): LogEntry[] => {
+  return parseStoredLogEntries(readStoredText(STORAGE_KEYS.transcriptLogs)).flatMap((entry) => {
+    const timestamp = new Date(entry.timestamp);
+    if (Number.isNaN(timestamp.getTime())) {
+      return [];
+    }
+    return [{ ...entry, timestamp }];
+  });
+};
+
 type DebugState = {
   currentSessionHandle: string | null;
   firstAudioLatencyMs: number | null;
   reconnectAttempts: number;
   lastReconnectReason: string | null;
   lastReconnectAt: string | null;
-  lastAutoCommentaryAt: string | null;
+  lastAutoSaveAt: string | null;
+  lastCommentaryAt: string | null;
 };
 
 const TAB_METADATA: Record<AppTab, { label: string; toolName: string; description: string; emptyState: string; }> = {
@@ -97,6 +114,12 @@ const TAB_METADATA: Record<AppTab, { label: string; toolName: string; descriptio
     description: 'Direct reminders, todos, and remember-this requests land here.',
     emptyState: 'No notes saved yet. Say add a note or remember this to trigger saveNote.',
   },
+  history: {
+    label: 'History & Analysis',
+    toolName: 'Local Analytics API',
+    description: 'Session history, saved context, and recap analysis from the local analytics store.',
+    emptyState: 'No session history yet. Start the local analytics API and run a session to populate this view.',
+  },
 };
 
 export default function App() {
@@ -111,11 +134,12 @@ export default function App() {
   });
 
   const [personality, setPersonality] = useState(personas[0].id);
-  const [frequency, setFrequency] = useState(0);
+  const [commentaryFrequency, setCommentaryFrequency] = useState(0);
+  const [frequency, setFrequency] = useState(DEFAULT_AUTO_SAVE_INTERVAL_MS);
   const [isSharing, setIsSharing] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [isMicMuted, setIsMicMuted] = useState(false);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>(() => readStoredLogs());
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
   // Notepad State
@@ -123,6 +147,11 @@ export default function App() {
   const [helpfulInfo, setHelpfulInfo] = useState<string>(() => readStoredText(STORAGE_KEYS.helpfulInfo));
   const [activityLog, setActivityLog] = useState<string>(() => readStoredText(STORAGE_KEYS.activityLog));
   const [savedNotes, setSavedNotes] = useState<string>(() => readStoredText(STORAGE_KEYS.savedNotes));
+  const [historySessions, setHistorySessions] = useState<AnalyticsSessionListItem[]>([]);
+  const [selectedHistorySessionId, setSelectedHistorySessionId] = useState<string | null>(null);
+  const [selectedHistoryTimeline, setSelectedHistoryTimeline] = useState<AnalyticsSessionTimeline | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   
   // Custom Persona State
   const [showAddPersona, setShowAddPersona] = useState(false);
@@ -137,8 +166,10 @@ export default function App() {
     reconnectAttempts: 0,
     lastReconnectReason: null,
     lastReconnectAt: null,
-    lastAutoCommentaryAt: null,
+    lastAutoSaveAt: null,
+    lastCommentaryAt: null,
   });
+  const [runtimeSupport, setRuntimeSupport] = useState(() => getRuntimeSupport());
 
   const selectedPersonality = personas.find((option) => option.id === personality) || personas[0];
   
@@ -172,14 +203,31 @@ export default function App() {
   const lastPromptAtRef = useRef(0);
   const sessionStartTimeRef = useRef<number | null>(null);
   const firstAudioChunkSeenRef = useRef(false);
+  const suppressModelOutputRef = useRef(false);
+  const analyticsSessionIdRef = useRef<string | null>(null);
+  const analyticsEventSeqRef = useRef(0);
   
   // Interval Refs
   const videoIntervalRef = useRef<number | null>(null);
   const commentaryIntervalRef = useRef<number | null>(null);
+  const backgroundSaveIntervalRef = useRef<number | null>(null);
 
   useEffect(() => {
     isMicMutedRef.current = isMicMuted;
   }, [isMicMuted]);
+
+  useEffect(() => {
+    const syncRuntimeSupport = () => {
+      setRuntimeSupport(getRuntimeSupport());
+    };
+
+    syncRuntimeSupport();
+    window.addEventListener('resize', syncRuntimeSupport);
+
+    return () => {
+      window.removeEventListener('resize', syncRuntimeSupport);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isRunning) {
@@ -198,6 +246,59 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.savedNotes, savedNotes);
   }, [savedNotes]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.transcriptLogs, serializeLogEntries(logs.map((log) => ({
+      id: log.id,
+      timestamp: log.timestamp.toISOString(),
+      text: log.text,
+      role: log.role,
+    }))));
+  }, [logs]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void fetchLatestAnalyticsSessionTimeline().then((timeline) => {
+      if (!timeline || cancelled) {
+        return;
+      }
+
+      const rehydrated = buildRehydratedSessionState(timeline);
+      const rehydratedLogs = rehydrated.logs.flatMap((entry) => {
+        const timestamp = new Date(entry.timestamp);
+        if (Number.isNaN(timestamp.getTime())) {
+          return [];
+        }
+        return [{ ...entry, timestamp }];
+      });
+
+      setLogs((prev) => (prev.length > 0 ? prev : rehydratedLogs));
+      setHelpfulInfo((prev) => (prev.trim() ? prev : rehydrated.helpfulInfo));
+      setActivityLog((prev) => (prev.trim() ? prev : rehydrated.activityLog));
+      setSavedNotes((prev) => (prev.trim() ? prev : rehydrated.savedNotes));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'history') {
+      return;
+    }
+
+    void refreshHistorySessions();
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab !== 'history' || !selectedHistorySessionId) {
+      return;
+    }
+
+    void refreshSelectedHistoryTimeline(selectedHistorySessionId);
+  }, [activeTab, selectedHistorySessionId]);
 
   const savePersonas = (newPersonas: Personality[]) => {
     setPersonas(newPersonas);
@@ -342,6 +443,11 @@ export default function App() {
       clearInterval(commentaryIntervalRef.current);
       commentaryIntervalRef.current = null;
     }
+
+    if (backgroundSaveIntervalRef.current) {
+      clearInterval(backgroundSaveIntervalRef.current);
+      backgroundSaveIntervalRef.current = null;
+    }
   };
 
   const clearReconnectTimer = () => {
@@ -351,7 +457,200 @@ export default function App() {
     }
   };
 
-  const sendSessionPrompt = (text: string, { isAuto = false }: { isAuto?: boolean } = {}) => {
+  const nextAnalyticsSeq = () => {
+    analyticsEventSeqRef.current += 1;
+    return analyticsEventSeqRef.current;
+  };
+
+  const recordAnalyticsEventSafe = (
+    input: Omit<AnalyticsRawEventInput, 'sessionId' | 'seq' | 'occurredAt'> & { occurredAt?: string },
+    sessionIdOverride?: string | null,
+  ) => {
+    const sessionId = sessionIdOverride || analyticsSessionIdRef.current;
+    if (!sessionId) {
+      return;
+    }
+
+    void recordAnalyticsEvent({
+      ...input,
+      sessionId,
+      seq: nextAnalyticsSeq(),
+      occurredAt: input.occurredAt || new Date().toISOString(),
+    });
+  };
+
+  const recordAnalyticsMemorySafe = (input: Omit<AnalyticsMemoryInput, 'sessionId'>, sessionIdOverride?: string | null) => {
+    const sessionId = sessionIdOverride || analyticsSessionIdRef.current;
+    if (!sessionId) {
+      return;
+    }
+
+    void recordAnalyticsMemory({
+      ...input,
+      sessionId,
+    });
+  };
+
+  const recordAnalyticsTurnSafe = (
+    input: Omit<Parameters<typeof recordAnalyticsTurn>[0], 'sessionId'>,
+    sessionIdOverride?: string | null,
+  ) => {
+    const sessionId = sessionIdOverride || analyticsSessionIdRef.current;
+    if (!sessionId) {
+      return;
+    }
+
+    void recordAnalyticsTurn({
+      ...input,
+      sessionId,
+    });
+  };
+
+  const refreshHistorySessions = async () => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+
+    const response = await fetchAnalyticsSessions(20);
+    if (!response) {
+      setHistorySessions([]);
+      setSelectedHistoryTimeline(null);
+      setSelectedHistorySessionId(null);
+      setHistoryError('Local analytics API unavailable. Start `npm run dev:api` to see session history here.');
+      setHistoryLoading(false);
+      return;
+    }
+
+    setHistorySessions(response.sessions);
+    setSelectedHistorySessionId((current) => {
+      if (current && response.sessions.some((item) => item.session.id === current)) {
+        return current;
+      }
+      return response.sessions[0]?.session.id ?? null;
+    });
+    setHistoryLoading(false);
+  };
+
+  const refreshSelectedHistoryTimeline = async (sessionId: string) => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+
+    const timeline = await fetchAnalyticsSessionTimeline(sessionId);
+    if (!timeline) {
+      setSelectedHistoryTimeline(null);
+      setHistoryError('Unable to load the selected session timeline from the local analytics API.');
+      setHistoryLoading(false);
+      return;
+    }
+
+    setSelectedHistoryTimeline(timeline);
+    setHistoryLoading(false);
+  };
+
+  const beginAnalyticsSession = (isReconnect: boolean) => {
+    if (analyticsSessionIdRef.current) {
+      recordAnalyticsEventSafe({
+        source: 'browserbud-ui',
+        eventType: 'session.reconnected',
+        payload: {
+          reconnectAttempt: reconnectAttemptsRef.current,
+        },
+      });
+      return;
+    }
+
+    const sessionId = crypto.randomUUID();
+    analyticsSessionIdRef.current = sessionId;
+    analyticsEventSeqRef.current = 0;
+
+    const sharedStream = videoRef.current?.srcObject as MediaStream | null;
+    const sharedTrack = sharedStream?.getVideoTracks?.()[0] || null;
+    const sourceSurface = sharedTrack?.getSettings?.().displaySurface || sharedTrack?.label || 'unknown';
+
+    void createAnalyticsSession({
+      id: sessionId,
+      startedAt: new Date().toISOString(),
+      sourceSurface,
+      personaId: selectedPersonality.id,
+      liveModel: LIVE_MODEL,
+      searchEnabled: sessionSearchEnabled,
+      captureMode: 'screen-share',
+    });
+
+    recordAnalyticsEventSafe({
+      source: 'browserbud-ui',
+      eventType: isReconnect ? 'session.reconnected' : 'session.started',
+      appName: 'BrowserBud',
+      pageTitle: selectedPersonality.name,
+      payload: {
+        voiceName: selectedPersonality.voiceName,
+        commentaryFrequencyMs: commentaryFrequency,
+        helpfulInfoAutoSaveFrequencyMs: frequency,
+        searchEnabled: sessionSearchEnabled,
+      },
+    }, sessionId);
+
+    if (activeTab === 'history') {
+      void refreshHistorySessions();
+    }
+  };
+
+  const finalizeAnalyticsSession = async (reason: string, { skipRecap = false }: { skipRecap?: boolean } = {}) => {
+    const sessionId = analyticsSessionIdRef.current;
+    if (!sessionId) {
+      return;
+    }
+
+    const endedAt = new Date().toISOString();
+    recordAnalyticsEventSafe({
+      source: 'browserbud-ui',
+      eventType: 'session.stopped',
+      payload: { reason },
+      occurredAt: endedAt,
+    }, sessionId);
+
+    analyticsSessionIdRef.current = null;
+    analyticsEventSeqRef.current = 0;
+
+    if (skipRecap) {
+      void completeAnalyticsSession(sessionId, endedAt);
+      if (activeTab === 'history') {
+        void refreshHistorySessions();
+      }
+      return;
+    }
+
+    const recapResponse = await generateAnalyticsSessionRecap(sessionId, endedAt);
+    if (!recapResponse?.summary) {
+      void completeAnalyticsSession(sessionId, endedAt);
+      return;
+    }
+
+    const timestamp = new Date();
+    const recapBody = recapResponse.summary.markdown.replace(/^# Session Recap\s*/i, '').trim();
+    const recapEntry = `### [${timestamp.toLocaleTimeString()}] Session Recap\n\n${recapBody}\n\n---\n\n`;
+    setHelpfulInfo((prev) => recapEntry + prev);
+    setLogs((prev) => [{
+      id: Math.random().toString(36).slice(2),
+      timestamp,
+      text: '[Action]: Saved a session recap to the Helpful Info tab.',
+      role: 'system',
+    }, ...prev]);
+
+    if (activeTab === 'history') {
+      void refreshHistorySessions();
+    }
+  };
+
+  const sendSessionPrompt = (
+    text: string,
+    {
+      kind = 'manual',
+      suppressOutput = false,
+    }: {
+      kind?: 'manual' | 'auto-save' | 'commentary';
+      suppressOutput?: boolean;
+    } = {},
+  ) => {
     const pendingSession = sessionRef.current;
     if (!pendingSession) {
       return;
@@ -360,35 +659,63 @@ export default function App() {
     pendingTurnRef.current = true;
     lastPromptAtRef.current = Date.now();
 
-    if (isAuto) {
+    if (kind === 'auto-save') {
       setDebugState((prev) => ({
         ...prev,
-        lastAutoCommentaryAt: new Date().toLocaleTimeString(),
+        lastAutoSaveAt: new Date().toLocaleTimeString(),
       }));
     }
 
+    if (kind === 'commentary') {
+      setDebugState((prev) => ({
+        ...prev,
+        lastCommentaryAt: new Date().toLocaleTimeString(),
+      }));
+    }
+
+    suppressModelOutputRef.current = suppressOutput;
+
     void pendingSession.then((session) => {
       session.sendRealtimeInput({ text });
-    }).catch(() => {});
+    }).catch(() => {
+      suppressModelOutputRef.current = false;
+    });
   };
 
-  const maybeTriggerAutoCommentary = () => {
-    if (frequency <= 0) {
+  const maybeTriggerTimedHelpfulInfoSave = () => {
+    if (!shouldRunTimedBackgroundSave({
+      frequencyMs: frequency,
+      nowMs: Date.now(),
+      isModelSpeaking: isModelSpeakingRef.current,
+      hasPendingTurn: pendingTurnRef.current,
+      hasPendingToolCall: pendingToolCallRef.current,
+      hasReconnectTimer: Boolean(reconnectTimeoutRef.current),
+      lastUserActivityAtMs: lastUserActivityAtRef.current,
+      lastPromptAtMs: lastPromptAtRef.current,
+      cooldownMs: AUTO_COMMENTARY_USER_COOLDOWN_MS,
+    })) {
       return;
     }
 
-    const now = Date.now();
-    if (isModelSpeakingRef.current || pendingTurnRef.current || pendingToolCallRef.current || reconnectTimeoutRef.current) {
-      return;
-    }
-    if (now - lastUserActivityAtRef.current < AUTO_COMMENTARY_USER_COOLDOWN_MS) {
-      return;
-    }
-    if (now - lastPromptAtRef.current < AUTO_COMMENTARY_USER_COOLDOWN_MS) {
+    sendSessionPrompt(buildAutoSavePrompt(), { kind: 'auto-save', suppressOutput: true });
+  };
+
+  const maybeTriggerTimedCommentary = () => {
+    if (!shouldRunTimedBackgroundSave({
+      frequencyMs: commentaryFrequency,
+      nowMs: Date.now(),
+      isModelSpeaking: isModelSpeakingRef.current,
+      hasPendingTurn: pendingTurnRef.current,
+      hasPendingToolCall: pendingToolCallRef.current,
+      hasReconnectTimer: Boolean(reconnectTimeoutRef.current),
+      lastUserActivityAtMs: lastUserActivityAtRef.current,
+      lastPromptAtMs: lastPromptAtRef.current,
+      cooldownMs: AUTO_COMMENTARY_USER_COOLDOWN_MS,
+    })) {
       return;
     }
 
-    sendSessionPrompt('Analyze the current screen and provide a brief spoken commentary only if something meaningfully changed or stands out. Use tools only when there is genuinely useful information worth saving.', { isAuto: true });
+    sendSessionPrompt(TIMED_COMMENTARY_PROMPT, { kind: 'commentary' });
   };
 
   const cleanupLiveSession = ({ closeSession = false, stopMic = true }: { closeSession?: boolean; stopMic?: boolean } = {}) => {
@@ -405,6 +732,7 @@ export default function App() {
     pendingToolCallRef.current = false;
     currentInputTranscriptRef.current = '';
     currentOutputTranscriptRef.current = '';
+    suppressModelOutputRef.current = false;
     lastPromptAtRef.current = 0;
     firstAudioChunkSeenRef.current = false;
     sessionStartTimeRef.current = null;
@@ -544,17 +872,65 @@ export default function App() {
       console.debug('Starting live session', { model: LIVE_MODEL, isReconnect, searchEnabled: sessionSearchEnabled });
 
       let currentTurnText = '';
+      const commitUserTurn = () => {
+        const text = currentInputTranscriptRef.current.trim();
+        if (!text) {
+          return;
+        }
+
+        const completedAt = new Date();
+        setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: completedAt, text, role: 'user' }, ...prev]);
+        recordAnalyticsTurnSafe({
+          id: crypto.randomUUID(),
+          role: 'user',
+          startedAt: completedAt.toISOString(),
+          endedAt: completedAt.toISOString(),
+          transcript: text,
+          promptKind: 'user-voice',
+        });
+        recordAnalyticsEventSafe({
+          source: 'browserbud-ui',
+          eventType: 'live.user_turn_completed',
+          occurredAt: completedAt.toISOString(),
+          payload: {
+            transcript: text,
+          },
+        });
+        currentInputTranscriptRef.current = '';
+      };
+
       const commitModelTurn = (suffix = '') => {
         const transcriptText = currentOutputTranscriptRef.current.trim();
         const fallbackText = currentTurnText.trim();
         const finalText = transcriptText || fallbackText;
         if (finalText) {
+          const completedAt = new Date();
+          const transcript = `${finalText}${suffix}`.trim();
           setLogs((prev) => [{
             id: Math.random().toString(36).substring(7),
-            timestamp: new Date(),
-            text: `${finalText}${suffix}`.trim(),
+            timestamp: completedAt,
+            text: transcript,
             role: 'model'
           }, ...prev]);
+          recordAnalyticsTurnSafe({
+            id: crypto.randomUUID(),
+            role: 'model',
+            startedAt: completedAt.toISOString(),
+            endedAt: completedAt.toISOString(),
+            transcript,
+            promptKind: 'live-response',
+            modelName: LIVE_MODEL,
+          });
+          recordAnalyticsEventSafe({
+            source: 'browserbud-ui',
+            eventType: 'live.model_turn_completed',
+            occurredAt: completedAt.toISOString(),
+            pageTitle: selectedPersonality.name,
+            payload: {
+              transcript,
+              interrupted: suffix.includes('Interrupted'),
+            },
+          });
         }
         currentTurnText = '';
         currentOutputTranscriptRef.current = '';
@@ -574,6 +950,7 @@ export default function App() {
 
 Tool rules:
 - The Helpful Info tab stores reusable recommendations, links, and takeaways. If the user asks you to save something useful for later, call appendHelpfulInfo in this turn.
+- When you receive a background auto-save check, you must call appendHelpfulInfo exactly once with a concise but useful note, even if only a short progress update is available.
 - The Activity Log tab stores structured records of meaningful task and page changes. When you call logActivity, include the app name, page title, visible URL if available, a one-line summary, and brief details. Call it when the user explicitly asks for logging or when there is a clear task/page change worth recording.
 - The Saved Notes tab stores direct reminders, todos, and remember-this requests. If the user says add a note, save this, or remember this, you must call saveNote in this turn before you finish responding.
 - Do not use tools on every turn.
@@ -646,6 +1023,7 @@ Tool rules:
             reconnectAttemptsRef.current = 0;
             setErrorMsg(null);
             setIsRunning(true);
+            beginAnalyticsSession(isReconnect);
             setDebugState((prev) => ({
               ...prev,
               reconnectAttempts: 0,
@@ -707,9 +1085,15 @@ Tool rules:
               }
             }, 2000);
 
-            if (frequency > 0) {
+            if (commentaryFrequency > 0) {
               commentaryIntervalRef.current = window.setInterval(() => {
-                maybeTriggerAutoCommentary();
+                maybeTriggerTimedCommentary();
+              }, commentaryFrequency);
+            }
+
+            if (frequency > 0) {
+              backgroundSaveIntervalRef.current = window.setInterval(() => {
+                maybeTriggerTimedHelpfulInfoSave();
               }, frequency);
             }
 
@@ -724,6 +1108,7 @@ Tool rules:
             const inputTranscription = message.serverContent?.inputTranscription;
             const outputTranscription = message.serverContent?.outputTranscription;
             const sessionResumptionUpdate = message.sessionResumptionUpdate;
+            const suppressModelOutput = suppressModelOutputRef.current;
 
             if (sessionResumptionUpdate?.resumable && sessionResumptionUpdate?.newHandle && sessionResumptionUpdate.newHandle !== sessionHandleRef.current) {
               sessionHandleRef.current = sessionResumptionUpdate.newHandle;
@@ -766,21 +1151,26 @@ Tool rules:
               pendingTurnRef.current = true;
               currentInputTranscriptRef.current = mergeIncrementalTranscript(currentInputTranscriptRef.current, inputTranscription.text);
             }
-            if (inputTranscription?.finished && currentInputTranscriptRef.current.trim()) {
-              const text = currentInputTranscriptRef.current.trim();
-              setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text, role: 'user' }, ...prev]);
-              currentInputTranscriptRef.current = '';
-            }
 
             const parts = message.serverContent?.modelTurn?.parts;
+            if (shouldCommitUserTranscript({
+              inputFinished: Boolean(inputTranscription?.finished),
+              hasModelParts: Boolean(parts?.length),
+              hasToolCall: Boolean(message.toolCall),
+              turnComplete: Boolean(message.serverContent?.turnComplete),
+              interrupted: Boolean(message.serverContent?.interrupted),
+            })) {
+              commitUserTurn();
+            }
+
             if (parts?.length) {
               pendingTurnRef.current = true;
               isModelSpeakingRef.current = true;
               for (const part of parts) {
-                if (part?.text) {
+                if (!suppressModelOutput && part?.text) {
                   currentTurnText += part.text;
                 }
-                if (part?.inlineData?.data) {
+                if (!suppressModelOutput && part?.inlineData?.data) {
                   if (!firstAudioChunkSeenRef.current && sessionStartTimeRef.current !== null) {
                     firstAudioChunkSeenRef.current = true;
                     setDebugState((prev) => ({
@@ -793,13 +1183,21 @@ Tool rules:
               }
             }
 
-            if (outputTranscription?.text !== undefined) {
+            if (!suppressModelOutput && outputTranscription?.text !== undefined) {
               currentOutputTranscriptRef.current = mergeIncrementalTranscript(currentOutputTranscriptRef.current, outputTranscription.text);
             }
 
             if (message.serverContent?.turnComplete) {
               isModelSpeakingRef.current = false;
-              commitModelTurn();
+              if (suppressModelOutputRef.current) {
+                suppressModelOutputRef.current = false;
+                currentTurnText = '';
+                currentOutputTranscriptRef.current = '';
+                pendingTurnRef.current = false;
+                pendingToolCallRef.current = false;
+              } else {
+                commitModelTurn();
+              }
             }
 
             if (message.serverContent?.interrupted) {
@@ -809,7 +1207,15 @@ Tool rules:
               if (playCtxRef.current) {
                 nextPlayTimeRef.current = playCtxRef.current.currentTime;
               }
-              commitModelTurn(' [Interrupted]');
+              if (suppressModelOutputRef.current) {
+                suppressModelOutputRef.current = false;
+                currentTurnText = '';
+                currentOutputTranscriptRef.current = '';
+                pendingTurnRef.current = false;
+                pendingToolCallRef.current = false;
+              } else {
+                commitModelTurn(' [Interrupted]');
+              }
             }
 
             if (message.toolCall) {
@@ -826,20 +1232,87 @@ Tool rules:
                     const title = args.title?.trim();
                     const heading = title ? `### [${timestamp}] ${title}` : `### [${timestamp}] Helpful Info`;
                     const infoEntry = `${heading}\n\n${args.content}\n\n---\n\n`;
+                    const eventId = crypto.randomUUID();
                     setHelpfulInfo((prev) => infoEntry + prev);
                     setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Added helpful info to the Helpful Info tab.', role: 'system' }, ...prev]);
+                    recordAnalyticsEventSafe({
+                      id: eventId,
+                      source: 'browserbud-ui',
+                      eventType: 'tool.helpful_info_saved',
+                      payload: {
+                        title: title || 'Helpful Info',
+                        content: args.content,
+                      },
+                    });
+                    recordAnalyticsMemorySafe({
+                      memoryType: 'helpful_info',
+                      title: title || 'Helpful Info',
+                      bodyMd: args.content,
+                      sourceEventIds: [eventId],
+                    });
                     functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
                   } else if (call.name === 'logActivity') {
                     const args = call.args as any;
                     const logEntry = formatActivityLogEntry(args, timestamp);
+                    const eventId = crypto.randomUUID();
+                    const pageTitle = typeof args.pageTitle === 'string' ? args.pageTitle.trim() : '';
+                    const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
+                    const urlValue = typeof args.url === 'string' ? args.url.trim() : '';
+                    let sourceUrl: string | null = null;
+                    let sourceDomain: string | null = null;
+                    try {
+                      if (urlValue) {
+                        const parsed = new URL(urlValue);
+                        sourceUrl = parsed.toString();
+                        sourceDomain = parsed.hostname;
+                      }
+                    } catch {}
                     setActivityLog((prev) => logEntry + prev);
                     setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Logged structured activity to the Activity Log tab.', role: 'system' }, ...prev]);
+                    recordAnalyticsEventSafe({
+                      id: eventId,
+                      source: 'browserbud-ui',
+                      eventType: 'tool.activity_logged',
+                      appName: typeof args.appName === 'string' ? args.appName.trim() : null,
+                      url: sourceUrl,
+                      domain: sourceDomain,
+                      pageTitle: pageTitle || null,
+                      payload: {
+                        appName: args.appName,
+                        pageTitle: args.pageTitle,
+                        url: args.url,
+                        summary: args.summary,
+                        details: args.details,
+                      },
+                    });
+                    recordAnalyticsMemorySafe({
+                      memoryType: 'activity_log',
+                      title: summary || pageTitle || 'Activity logged',
+                      bodyMd: logEntry,
+                      sourceUrl,
+                      sourceEventIds: [eventId],
+                    });
                     functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
                   } else if (call.name === 'saveNote') {
                     const args = call.args as any;
                     const noteEntry = `- **[${timestamp}]** ${args.note}\n`;
+                    const eventId = crypto.randomUUID();
                     setSavedNotes((prev) => noteEntry + prev);
                     setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Saved note to the Saved Notes tab.', role: 'system' }, ...prev]);
+                    recordAnalyticsEventSafe({
+                      id: eventId,
+                      source: 'browserbud-ui',
+                      eventType: 'tool.note_saved',
+                      payload: {
+                        note: args.note,
+                      },
+                    });
+                    recordAnalyticsMemorySafe({
+                      memoryType: 'saved_note',
+                      title: typeof args.note === 'string' && args.note.trim() ? args.note.trim().slice(0, 80) : 'Saved Note',
+                      bodyMd: typeof args.note === 'string' ? args.note : '',
+                      sourceEventIds: [eventId],
+                    });
                     functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
                   }
                 }
@@ -902,6 +1375,7 @@ Tool rules:
 
 
   const stopLive = () => {
+    void finalizeAnalyticsSession('user_stopped_session');
     shouldStayConnectedRef.current = false;
     isStoppingRef.current = true;
     clearReconnectTimer();
@@ -927,15 +1401,76 @@ Tool rules:
       isUnmountingRef.current = true;
       shouldStayConnectedRef.current = false;
       clearReconnectTimer();
+      void finalizeAnalyticsSession('app_unmounted', { skipRecap: true });
       cleanupLiveSession({ closeSession: true, stopMic: true });
     };
   }, []);
+
+  const selectedHistorySession = historySessions.find((item) => item.session.id === selectedHistorySessionId) || null;
+  const historyTurns = selectedHistoryTimeline ? [...selectedHistoryTimeline.turns].reverse().slice(0, 6) : [];
+  const historyEvents = selectedHistoryTimeline ? [...selectedHistoryTimeline.events].reverse().slice(0, 8) : [];
+  const historyMemories = selectedHistoryTimeline ? selectedHistoryTimeline.memories.slice(0, 8) : [];
+
+  if (!runtimeSupport.supported) {
+    return (
+      <div className="min-h-screen bg-[#FAFAF8] px-6 py-10 text-stone-900 selection:bg-teal-500/20 sm:px-8">
+        <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-3xl items-center">
+          <div className="w-full rounded-[32px] border border-stone-200 bg-white p-8 shadow-sm sm:p-10">
+            <div className="inline-flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-amber-700">
+              <MonitorOff className="h-4 w-4" />
+              {runtimeSupport.desktopOnly ? 'Desktop only' : 'Browser unsupported'}
+            </div>
+
+            <h1 className="mt-6 text-3xl font-semibold tracking-tight text-stone-900 sm:text-4xl">
+              {runtimeSupport.desktopOnly ? 'BrowserBud needs a desktop browser' : 'This browser cannot run BrowserBud'}
+            </h1>
+
+            <p className="mt-4 text-base leading-7 text-stone-600 sm:text-lg">
+              {runtimeSupport.desktopOnly
+                ? 'The live companion relies on tab or screen capture, microphone capture, and realtime audio APIs that are not reliable on mobile browsers today.'
+                : 'BrowserBud could not find the browser APIs it needs for screen sharing, microphone access, and realtime audio.'}
+            </p>
+
+            <div className="mt-6 rounded-2xl border border-stone-200 bg-stone-50 p-5">
+              <div className="text-sm font-medium text-stone-800">What to do instead</div>
+              <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-stone-600">
+                <li>Open BrowserBud on a desktop or laptop browser.</li>
+                <li>Use a current version of Chrome, Edge, Firefox, or Safari on macOS.</li>
+                <li>If you are opening from an embedded preview, move it into a normal browser tab first.</li>
+              </ul>
+            </div>
+
+            <div className="mt-6 rounded-2xl border border-stone-200 bg-white p-5">
+              <div className="text-sm font-medium text-stone-800">Detected blockers</div>
+              <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-stone-600">
+                {runtimeSupport.reasons.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center">
+              <a
+                href="/"
+                className="inline-flex items-center justify-center rounded-full bg-teal-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-teal-700"
+              >
+                Back to home
+              </a>
+              <p className="text-sm text-stone-500">
+                Reopen this URL on a desktop browser to use the live companion.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#FAFAF8] text-stone-900 font-sans selection:bg-teal-500/20">
       <canvas ref={canvasRef} className="hidden" />
 
-      <div className="max-w-6xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-8 h-screen max-h-screen overflow-hidden">
+      <div className="max-w-6xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-8 h-screen max-h-screen min-h-0 overflow-hidden">
 
         {/* Left Panel: Configuration */}
         <div className="lg:col-span-4 flex flex-col gap-6 h-full overflow-y-auto pr-2 pb-8 custom-scrollbar">
@@ -1100,6 +1635,26 @@ Tool rules:
                 Auto-Commentary Frequency
               </label>
               <select
+                value={commentaryFrequency}
+                onChange={(e) => setCommentaryFrequency(Number(e.target.value))}
+                disabled={isRunning}
+                className="w-full bg-white border border-stone-200 rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500/30 appearance-none disabled:opacity-50"
+              >
+                {FREQUENCIES.map(f => (
+                  <option key={f.id} value={f.id}>{f.name}</option>
+                ))}
+              </select>
+              <p className="text-xs text-stone-500">
+                Spoken commentary during idle windows. BrowserBud waits until you stop talking before triggering these prompts.
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <label className="text-sm font-medium text-stone-700 flex items-center gap-2">
+                <Clock className="w-4 h-4 text-stone-400" />
+                Helpful Info Auto-Save
+              </label>
+              <select
                 value={frequency}
                 onChange={(e) => setFrequency(Number(e.target.value))}
                 disabled={isRunning}
@@ -1110,7 +1665,7 @@ Tool rules:
                 ))}
               </select>
               <p className="text-xs text-stone-500">
-                Off is the most reliable mode for voice requests. Timed commentary only runs after a short user-silence cooldown now.
+                Runs silent background saves into Helpful Info after a short idle cooldown. Nothing is spoken out loud during these timed saves.
               </p>
             </div>
 
@@ -1173,7 +1728,7 @@ Tool rules:
         </div>
 
         {/* Right Panel: Feed & Notepad */}
-        <div className="lg:col-span-8 flex flex-col h-full bg-white border border-stone-200 rounded-xl overflow-hidden shadow-sm">
+        <div className="lg:col-span-8 flex min-h-0 flex-col h-full bg-white border border-stone-200 rounded-xl overflow-hidden shadow-sm">
 
           {/* Tabs Header */}
           <div className="px-4 pt-4 border-b border-stone-200 bg-white flex flex-col gap-4 z-10">
@@ -1188,7 +1743,7 @@ Tool rules:
                   </div>
 
                   <button
-                    onClick={() => sendSessionPrompt('Provide a brief commentary on what is happening on the screen right now.')}
+                    onClick={() => sendSessionPrompt(TIMED_COMMENTARY_PROMPT)}
                     disabled={!isRunning}
                     className="text-xs bg-stone-100 hover:bg-stone-200 text-stone-600 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
                   >
@@ -1215,7 +1770,10 @@ Tool rules:
                   <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Session Debug</div>
                   <div className="mt-1 text-sm font-medium text-stone-700">Search {sessionSearchEnabled ? 'ON' : 'OFF'}</div>
                   <div className="text-xs text-stone-500">
-                    {debugState.lastAutoCommentaryAt ? `Last auto comment ${debugState.lastAutoCommentaryAt}` : 'No auto commentary yet'}
+                    {debugState.lastAutoSaveAt ? `Helpful save ${debugState.lastAutoSaveAt}` : 'No helpful auto saves yet'}
+                  </div>
+                  <div className="text-xs text-stone-500">
+                    {debugState.lastCommentaryAt ? `Commentary ${debugState.lastCommentaryAt}` : 'No timed commentary yet'}
                   </div>
                 </div>
               </div>
@@ -1257,11 +1815,20 @@ Tool rules:
                 <Bookmark className="w-4 h-4" />
                 Saved Notes
               </button>
+              <button
+                onClick={() => setActiveTab('history')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
+                  activeTab === 'history' ? 'bg-teal-50 text-teal-700 font-medium' : 'text-stone-500 hover:text-stone-700 hover:bg-stone-50'
+                }`}
+              >
+                <FileText className="w-4 h-4" />
+                History & Analysis
+              </button>
             </div>
           </div>
 
           {/* Tab Content */}
-          <div className="flex-1 overflow-y-auto p-6 relative custom-scrollbar">
+          <div className="flex-1 min-h-0 overflow-y-auto p-6 relative custom-scrollbar">
             <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">{TAB_METADATA[activeTab].label}</div>
@@ -1274,7 +1841,7 @@ Tool rules:
 
             {/* Transcript Tab */}
             {activeTab === 'transcript' && (
-              <div className="flex flex-col gap-4 flex-col-reverse h-full">
+              <div className="min-h-full flex flex-col-reverse gap-4">
                 <AnimatePresence initial={false}>
                   {logs.map((log, i) => (
                     <motion.div
@@ -1324,7 +1891,7 @@ Tool rules:
 
             {/* Helpful Info Tab */}
             {activeTab === 'info' && (
-              <div className="h-full">
+              <div className="min-h-full">
                 {helpfulInfo ? (
                   <div className="prose prose-stone prose-teal max-w-none">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{helpfulInfo}</ReactMarkdown>
@@ -1340,7 +1907,7 @@ Tool rules:
 
             {/* Activity Log Tab */}
             {activeTab === 'activity' && (
-              <div className="h-full">
+              <div className="min-h-full">
                 {activityLog ? (
                   <div className="prose prose-stone prose-teal max-w-none">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{activityLog}</ReactMarkdown>
@@ -1356,7 +1923,7 @@ Tool rules:
 
             {/* Saved Notes Tab */}
             {activeTab === 'notes' && (
-              <div className="h-full">
+              <div className="min-h-full">
                 {savedNotes ? (
                   <div className="prose prose-stone prose-teal max-w-none">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{savedNotes}</ReactMarkdown>
@@ -1365,6 +1932,188 @@ Tool rules:
                   <div className="flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
                     <Bookmark className="w-12 h-12 opacity-15" />
                     <p>{TAB_METADATA.notes.emptyState}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'history' && (
+              <div className="min-h-full">
+                {historyError && (
+                  <div className="mb-5 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    {historyError}
+                  </div>
+                )}
+
+                {historyLoading && historySessions.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
+                    <FileText className="w-12 h-12 opacity-15" />
+                    <p>Loading session history…</p>
+                  </div>
+                ) : historySessions.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
+                    <FileText className="w-12 h-12 opacity-15" />
+                    <p>{TAB_METADATA.history.emptyState}</p>
+                  </div>
+                ) : (
+                  <div className="grid gap-6 lg:grid-cols-[250px_minmax(0,1fr)]">
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="text-xs font-medium uppercase tracking-[0.16em] text-stone-400">Sessions</div>
+                        <button
+                          onClick={() => void refreshHistorySessions()}
+                          className="rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-600 transition-colors hover:bg-stone-50"
+                        >
+                          Refresh
+                        </button>
+                      </div>
+                      <div className="space-y-2">
+                        {historySessions.map((item) => (
+                          <button
+                            key={item.session.id}
+                            onClick={() => setSelectedHistorySessionId(item.session.id)}
+                            className={`w-full rounded-2xl border px-4 py-3 text-left transition-colors ${
+                              item.session.id === selectedHistorySessionId
+                                ? 'border-teal-300 bg-teal-50'
+                                : 'border-stone-200 bg-white hover:bg-stone-50'
+                            }`}
+                          >
+                            <div className="text-sm font-semibold text-stone-900">
+                              {new Date(item.session.startedAt).toLocaleString()}
+                            </div>
+                            <div className="mt-1 text-xs text-stone-500">
+                              {item.session.personaId || 'No persona'} · {item.session.liveModel || 'Unknown model'}
+                            </div>
+                            <div className="mt-2 text-xs text-stone-500">
+                              {item.latestSummary ? 'Recap ready' : 'No recap yet'}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="min-w-0 space-y-5">
+                      {!selectedHistorySession || !selectedHistoryTimeline ? (
+                        <div className="rounded-2xl border border-stone-200 bg-white p-6 text-sm text-stone-500">
+                          Select a session to inspect its saved context and analysis.
+                        </div>
+                      ) : (
+                        <>
+                          <div className="rounded-2xl border border-stone-200 bg-white p-5">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div>
+                                <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Selected Session</div>
+                                <h3 className="mt-1 text-lg font-semibold text-stone-900">
+                                  {new Date(selectedHistorySession.session.startedAt).toLocaleString()}
+                                </h3>
+                              </div>
+                              <div className="flex flex-wrap gap-2 text-xs text-stone-500">
+                                <span className="rounded-full border border-stone-200 bg-stone-50 px-3 py-1">
+                                  {selectedHistoryTimeline.events.length} events
+                                </span>
+                                <span className="rounded-full border border-stone-200 bg-stone-50 px-3 py-1">
+                                  {selectedHistoryTimeline.turns.length} turns
+                                </span>
+                                <span className="rounded-full border border-stone-200 bg-stone-50 px-3 py-1">
+                                  {selectedHistoryTimeline.memories.length} saved items
+                                </span>
+                              </div>
+                            </div>
+                            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                              <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+                                <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Persona</div>
+                                <div className="mt-1 text-sm font-medium text-stone-700">{selectedHistorySession.session.personaId || 'Unknown'}</div>
+                              </div>
+                              <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+                                <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Model</div>
+                                <div className="mt-1 text-sm font-medium text-stone-700">{selectedHistorySession.session.liveModel || 'Unknown'}</div>
+                              </div>
+                              <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+                                <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Capture</div>
+                                <div className="mt-1 text-sm font-medium text-stone-700">{selectedHistorySession.session.captureMode}</div>
+                              </div>
+                              <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+                                <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Ended</div>
+                                <div className="mt-1 text-sm font-medium text-stone-700">
+                                  {selectedHistorySession.session.endedAt ? new Date(selectedHistorySession.session.endedAt).toLocaleTimeString() : 'Still running'}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="rounded-2xl border border-stone-200 bg-white p-5">
+                            <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Analysis</div>
+                            <h3 className="mt-1 text-lg font-semibold text-stone-900">Session recap</h3>
+                            {selectedHistorySession.latestSummary ? (
+                              <div className="prose prose-stone prose-teal mt-4 max-w-none">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedHistorySession.latestSummary.markdown}</ReactMarkdown>
+                              </div>
+                            ) : (
+                              <p className="mt-4 text-sm text-stone-500">
+                                No recap has been generated for this session yet. Stop the session or refresh after the recap finishes.
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="grid gap-5 xl:grid-cols-2">
+                            <div className="rounded-2xl border border-stone-200 bg-white p-5">
+                              <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Saved Context</div>
+                              <h3 className="mt-1 text-lg font-semibold text-stone-900">Memories and notes</h3>
+                              <div className="mt-4 space-y-3">
+                                {historyMemories.length > 0 ? historyMemories.map((memory) => (
+                                  <div key={memory.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+                                    <div className="text-sm font-medium text-stone-900">{memory.title}</div>
+                                    <div className="mt-1 text-xs uppercase tracking-[0.12em] text-teal-600">{memory.memoryType}</div>
+                                    <div className="mt-2 text-sm text-stone-600 whitespace-pre-wrap">{memory.bodyMd}</div>
+                                  </div>
+                                )) : (
+                                  <p className="text-sm text-stone-500">No saved context for this session yet.</p>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="rounded-2xl border border-stone-200 bg-white p-5">
+                              <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Conversation Context</div>
+                              <h3 className="mt-1 text-lg font-semibold text-stone-900">Recent turns</h3>
+                              <div className="mt-4 space-y-3">
+                                {historyTurns.length > 0 ? historyTurns.map((turn) => (
+                                  <div key={turn.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+                                    <div className="flex items-center justify-between gap-3 text-xs text-stone-400">
+                                      <span className="font-medium uppercase tracking-[0.12em] text-teal-600">{turn.role}</span>
+                                      <span>{new Date(turn.startedAt).toLocaleTimeString()}</span>
+                                    </div>
+                                    <div className="mt-2 text-sm text-stone-700">{turn.transcript}</div>
+                                  </div>
+                                )) : (
+                                  <p className="text-sm text-stone-500">No transcript turns stored for this session yet.</p>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="rounded-2xl border border-stone-200 bg-white p-5">
+                            <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Raw Context</div>
+                            <h3 className="mt-1 text-lg font-semibold text-stone-900">Recent events</h3>
+                            <div className="mt-4 space-y-3">
+                              {historyEvents.length > 0 ? historyEvents.map((event) => (
+                                <div key={event.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+                                  <div className="flex flex-wrap items-center gap-2 text-xs text-stone-400">
+                                    <span className="font-medium uppercase tracking-[0.12em] text-teal-600">{event.eventType}</span>
+                                    <span>{new Date(event.occurredAt).toLocaleTimeString()}</span>
+                                    {event.domain && <span>{event.domain}</span>}
+                                  </div>
+                                  <div className="mt-2 text-sm text-stone-700">
+                                    {event.pageTitle || event.url || event.appName || 'No page or app context'}
+                                  </div>
+                                </div>
+                              )) : (
+                                <p className="text-sm text-stone-500">No raw events recorded for this session yet.</p>
+                              )}
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>

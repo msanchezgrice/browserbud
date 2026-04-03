@@ -10,6 +10,7 @@ export default defineConfig(({mode}) => {
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
       'process.env.GEMINI_LIVE_MODEL': JSON.stringify(env.GEMINI_LIVE_MODEL),
+      'process.env.BROWSERBUD_LOCAL_API_URL': JSON.stringify(env.BROWSERBUD_LOCAL_API_URL),
     },
     resolve: {
       alias: {

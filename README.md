@@ -16,6 +16,18 @@ View your app in AI Studio: https://ai.studio/apps/d7535ede-66c7-497e-a169-bbca1
 1. Install dependencies:
    `npm install`
 2. Set the `GEMINI_API_KEY` in `.env.local` to your Gemini API key
-3. (Optional) Set `GEMINI_LIVE_MODEL` in `.env.local` if you want to override the default live model (`gemini-live-2.5-flash-preview`)
+3. (Optional) Set `GEMINI_LIVE_MODEL` in `.env.local` if you want to override the default live model (`gemini-3.1-flash-live-preview`)
 4. Run the app:
    `npm run dev`
+
+## Local Analytics API
+
+Browserbud now supports a local-first analytics companion backed by SQLite.
+
+1. Start the analytics API:
+   `npm run dev:api`
+2. Start the app in a second terminal:
+   `npm run dev`
+
+By default the UI posts analytics events to `http://127.0.0.1:3011/api/analytics`.
+Override this with `BROWSERBUD_LOCAL_API_URL` if needed.
