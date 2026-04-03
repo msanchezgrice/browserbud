@@ -9,9 +9,32 @@ import type {
   SessionRecapPayload,
 } from './analyticsTypes';
 
-const ANALYTICS_API_URL = process.env.BROWSERBUD_LOCAL_API_URL || 'http://127.0.0.1:3011/api/analytics';
+function resolveAnalyticsApiUrl(): string | null {
+  const configuredUrl = process.env.BROWSERBUD_LOCAL_API_URL?.trim();
+  if (configuredUrl) {
+    return configuredUrl;
+  }
+
+  if (typeof window === 'undefined') {
+    return 'http://127.0.0.1:3011/api/analytics';
+  }
+
+  const hostname = window.location.hostname;
+  const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
+  if (window.location.protocol === 'http:' && isLocalhost) {
+    return 'http://127.0.0.1:3011/api/analytics';
+  }
+
+  return null;
+}
+
+const ANALYTICS_API_URL = resolveAnalyticsApiUrl();
 
 async function request<TResponse>(pathname: string, init?: RequestInit): Promise<TResponse | null> {
+  if (!ANALYTICS_API_URL) {
+    return null;
+  }
+
   try {
     const response = await fetch(`${ANALYTICS_API_URL}${pathname}`, {
       ...init,
