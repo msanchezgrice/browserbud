@@ -1,0 +1,8 @@
+{
+  "name": "Browsing Companion Prototype",
+  "description": "A prototype dashboard for an AI companion that watches your browsing and provides commentary using Gemini 3.1 Flash Lite.",
+  "requestFramePermissions": [
+    "display-capture",
+    "microphone"
+  ]
+}
