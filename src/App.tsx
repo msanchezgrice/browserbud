@@ -754,11 +754,11 @@ ${args.content}
   return (
     <div className="min-h-screen bg-[#FAFAF8] text-stone-900 font-sans selection:bg-teal-500/20">
       <canvas ref={canvasRef} className="hidden" />
-      
+
       <div className="max-w-6xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-8 h-screen max-h-screen overflow-hidden">
-        
+
         {/* Left Panel: Configuration */}
-        <div className="lg:col-span-4 flex flex-col gap-6 h-full overflow-y-auto pr-2 pb-8">
+        <div className="lg:col-span-4 flex flex-col gap-6 h-full overflow-y-auto pr-2 pb-8 custom-scrollbar">
           <div className="space-y-3">
             <div className="space-y-2">
               <h1 className="text-xl font-semibold tracking-tight flex items-center gap-2.5">
@@ -776,45 +776,45 @@ ${args.content}
             )}
           </div>
 
-          <div className="bg-white border border-stone-200 rounded-xl p-5 space-y-6 shadow-sm">
-            
+          <div className="bg-white border border-[#E8E5E0] rounded-xl p-5 space-y-6 shadow-sm">
+
             {/* Screen Share Preview */}
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-                  <Monitor className="w-4 h-4 text-slate-400" />
+                <label className="text-sm font-medium text-stone-700 flex items-center gap-2">
+                  <Monitor className="w-4 h-4 text-stone-400" />
                   Screen Source
                 </label>
                 <button
                   onClick={toggleSharing}
                   className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${
-                    isSharing 
-                      ? 'bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200' 
-                      : 'bg-sky-50 text-sky-700 hover:bg-sky-100 border border-sky-200'
+                    isSharing
+                      ? 'bg-rose-50 text-rose-600 hover:bg-rose-100'
+                      : 'bg-teal-50 text-teal-600 hover:bg-teal-100'
                   }`}
                 >
                   {isSharing ? 'Stop Sharing' : 'Share Tab/Screen'}
                 </button>
               </div>
-              
-              <div className="relative aspect-video bg-slate-100 rounded-xl overflow-hidden border border-slate-200 flex items-center justify-center">
+
+              <div className="relative aspect-video bg-stone-50 rounded-lg overflow-hidden border border-stone-200 shadow-inner flex items-center justify-center">
                 {!isSharing && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 gap-2">
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-stone-400 gap-2">
                     <MonitorOff className="w-8 h-8 opacity-50" />
                     <span className="text-sm">No screen shared</span>
                   </div>
                 )}
-                <video 
-                  ref={videoRef} 
-                  autoPlay 
-                  playsInline 
-                  muted 
-                  className={`w-full h-full object-contain ${!isSharing ? 'opacity-0' : 'opacity-100'}`} 
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className={`w-full h-full object-contain ${!isSharing ? 'opacity-0' : 'opacity-100'}`}
                 />
               </div>
-              
-              <div className="flex items-start gap-2 text-xs text-slate-600 bg-sky-50 p-3 rounded-xl border border-sky-100">
-                <Info className="w-4 h-4 shrink-0 text-sky-600" />
+
+              <div className="flex items-start gap-2 text-xs text-stone-500 bg-stone-50 p-3 rounded-xl border border-stone-200">
+                <Info className="w-4 h-4 shrink-0 text-teal-500" />
                 <p>To have the companion follow you across all tabs, choose <strong>"Entire Screen"</strong> when sharing.</p>
               </div>
             </div>
@@ -822,21 +822,21 @@ ${args.content}
             {/* Personality Select & Management */}
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-                  <User className="w-4 h-4 text-slate-400" />
+                <label className="text-sm font-medium text-stone-700 flex items-center gap-2">
+                  <User className="w-4 h-4 text-stone-400" />
                   Companion Personality
                 </label>
                 <div className="flex gap-2">
                   <button
                     onClick={resetPersonas}
-                    className="text-xs text-slate-500 hover:text-slate-700 transition-colors"
+                    className="text-xs text-stone-400 hover:text-stone-600 transition-colors"
                     title="Reset to defaults"
                   >
                     <RotateCcw className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => setShowAddPersona(!showAddPersona)}
-                    className="text-xs text-sky-700 hover:text-sky-800 transition-colors flex items-center gap-1"
+                    className="text-xs text-teal-600 hover:text-teal-500 transition-colors flex items-center gap-1"
                   >
                     <Plus className="w-4 h-4" /> Add
                   </button>
@@ -844,27 +844,27 @@ ${args.content}
               </div>
 
               {showAddPersona && (
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+                <div className="bg-stone-50 p-4 rounded-xl border border-stone-200 space-y-3">
                   <input
                     type="text"
                     placeholder="Persona Name (e.g. Pirate)"
                     value={newPersonaName}
                     onChange={e => setNewPersonaName(e.target.value)}
-                    className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sky-500"
+                    className="w-full bg-white border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500/20"
                   />
                   <textarea
                     placeholder="Prompt (e.g. You are a pirate looking at the screen...)"
                     value={newPersonaPrompt}
                     onChange={e => setNewPersonaPrompt(e.target.value)}
                     rows={3}
-                    className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sky-500 resize-none"
+                    className="w-full bg-white border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500/20 resize-none"
                   />
-                  <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-                    <input 
-                      type="checkbox" 
-                      checked={newPersonaSearch} 
+                  <label className="flex items-center gap-2 text-sm text-stone-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={newPersonaSearch}
                       onChange={e => setNewPersonaSearch(e.target.checked)}
-                      className="rounded border-slate-300 bg-white text-sky-600 focus:ring-sky-500"
+                      className="rounded border-stone-300 bg-white text-teal-600 focus:ring-teal-500"
                     />
                     Enable Google Search (Grounded, slower)
                   </label>
@@ -872,13 +872,13 @@ ${args.content}
                     <select
                       value={newPersonaVoice}
                       onChange={e => setNewPersonaVoice(e.target.value)}
-                      className="flex-1 bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sky-500"
+                      className="flex-1 bg-white border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-teal-500"
                     >
                       {AVAILABLE_VOICES.map(v => <option key={v} value={v}>{v} Voice</option>)}
                     </select>
                     <button
                       onClick={addPersona}
-                      className="bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+                      className="bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
                     >
                       Save
                     </button>
@@ -892,19 +892,19 @@ ${args.content}
                     key={p.id}
                     onClick={() => setPersonality(p.id)}
                     disabled={isRunning}
-                    className={`text-left px-4 py-3 rounded-xl text-sm transition-all border flex items-center justify-between group ${
-                      personality === p.id 
-                        ? 'bg-sky-50 border-sky-200 text-sky-900' 
-                        : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                    className={`text-left px-4 py-3 rounded-lg text-sm transition-all border flex items-center justify-between group ${
+                      personality === p.id
+                        ? 'bg-teal-50 border-l-2 border-teal-500 text-stone-900'
+                        : 'bg-white border-stone-200 text-stone-600 hover:bg-stone-50'
                     } ${isRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
                     <div className="flex items-center gap-2">
                       <div className="font-medium">{p.name}</div>
-                      {p.useSearch && <span title="Uses Google Search"><Search className="w-3 h-3 text-sky-600" /></span>}
+                      {p.useSearch && <span title="Uses Google Search"><Search className="w-3 h-3 text-teal-500" /></span>}
                     </div>
                     {p.isCustom && !isRunning && (
-                      <Trash2 
-                        className="w-4 h-4 text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity hover:text-rose-600" 
+                      <Trash2
+                        className="w-4 h-4 text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity hover:text-rose-500"
                         onClick={(e) => deletePersona(p.id, e)}
                       />
                     )}
@@ -915,15 +915,15 @@ ${args.content}
 
             {/* Frequency Select */}
             <div className="space-y-3">
-              <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-                <Clock className="w-4 h-4 text-slate-400" />
+              <label className="text-sm font-medium text-stone-700 flex items-center gap-2">
+                <Clock className="w-4 h-4 text-stone-400" />
                 Auto-Commentary Frequency
               </label>
               <select
                 value={frequency}
                 onChange={(e) => setFrequency(Number(e.target.value))}
                 disabled={isRunning}
-                className="w-full bg-white border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500/30 appearance-none disabled:opacity-50"
+                className="w-full bg-white border border-stone-200 rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500/30 appearance-none disabled:opacity-50"
               >
                 {FREQUENCIES.map(f => (
                   <option key={f.id} value={f.id}>{f.name}</option>
@@ -932,31 +932,31 @@ ${args.content}
             </div>
 
             {/* Controls */}
-            <div className="pt-4 border-t border-slate-200 flex gap-3">
+            <div className="pt-4 border-t border-stone-200 flex gap-3">
               <button
                 onClick={toggleRunning}
                 disabled={!isSharing}
-                className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-medium transition-all ${
+                className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-medium transition-all ${
                   !isSharing
-                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                    : isRunning 
-                      ? 'bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200' 
-                      : 'bg-slate-900 text-white hover:bg-slate-800 shadow-lg shadow-slate-300/50'
+                    ? 'bg-stone-100 text-stone-400 cursor-not-allowed'
+                    : isRunning
+                      ? 'bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200'
+                      : 'bg-teal-600 text-white hover:bg-teal-700 shadow-md shadow-teal-600/15'
                 }`}
               >
                 {isRunning ? <Square className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
                 {isRunning ? 'Stop Companion' : 'Start Companion'}
               </button>
-              
+
               <button
                 onClick={() => setIsMicMuted(!isMicMuted)}
                 disabled={!isRunning}
-                className={`p-3 rounded-xl border transition-all ${
-                  !isRunning 
-                    ? 'bg-slate-100 border-slate-200 text-slate-300 cursor-not-allowed'
-                    : isMicMuted 
-                      ? 'bg-rose-50 border-rose-200 text-rose-600' 
-                      : 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100'
+                className={`p-3 rounded-lg border transition-all ${
+                  !isRunning
+                    ? 'bg-stone-50 border-stone-200 text-stone-400 cursor-not-allowed'
+                    : isMicMuted
+                      ? 'bg-rose-50 border-rose-200 text-rose-500'
+                      : 'bg-emerald-50 border-emerald-200 text-emerald-600 hover:bg-emerald-100'
                 }`}
                 title={isMicMuted ? "Unmute Microphone" : "Mute Microphone"}
               >
@@ -967,20 +967,20 @@ ${args.content}
         </div>
 
         {/* Right Panel: Feed & Notepad */}
-        <div className="lg:col-span-8 flex flex-col h-full bg-white/80 border border-slate-200 rounded-2xl overflow-hidden shadow-[0_24px_60px_rgba(15,23,42,0.08)] backdrop-blur">
-          
+        <div className="lg:col-span-8 flex flex-col h-full bg-white border border-stone-200 rounded-xl overflow-hidden shadow-sm">
+
           {/* Tabs Header */}
-          <div className="px-4 pt-4 border-b border-slate-200 bg-white/95 flex flex-col gap-4 z-10">
+          <div className="px-4 pt-4 border-b border-stone-200 bg-white flex flex-col gap-4 z-10">
             <div className="flex items-center justify-between px-2">
               <div className="flex items-center gap-4">
                 <div className={`flex items-center gap-2 text-xs font-medium px-2.5 py-1 rounded-full border ${
-                  isRunning ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-slate-100 text-slate-500 border-slate-200'
+                  isRunning ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-stone-100 text-stone-500 border-stone-200'
                 }`}>
-                  <div className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
+                  <div className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'}`} />
                   {isRunning ? 'LIVE' : 'OFFLINE'}
                 </div>
-                
-                <button 
+
+                <button
                   onClick={() => {
                     if (sessionRef.current) {
                       sessionRef.current.then(session => {
@@ -989,7 +989,7 @@ ${args.content}
                     }
                   }}
                   disabled={!isRunning}
-                  className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                  className="text-xs bg-stone-100 hover:bg-stone-200 text-stone-600 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
                 >
                   Force Comment
                 </button>
@@ -1000,7 +1000,7 @@ ${args.content}
               <button
                 onClick={() => setActiveTab('transcript')}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
-                  activeTab === 'transcript' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100'
+                  activeTab === 'transcript' ? 'bg-stone-100 text-stone-900 font-medium' : 'text-stone-500 hover:text-stone-700 hover:bg-stone-50'
                 }`}
               >
                 <MessageSquare className="w-4 h-4" />
@@ -1009,7 +1009,7 @@ ${args.content}
               <button
                 onClick={() => setActiveTab('info')}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
-                  activeTab === 'info' ? 'bg-sky-100 text-sky-800' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100'
+                  activeTab === 'info' ? 'bg-teal-50 text-teal-700 font-medium' : 'text-stone-500 hover:text-stone-700 hover:bg-stone-50'
                 }`}
               >
                 <BookOpen className="w-4 h-4" />
@@ -1018,7 +1018,7 @@ ${args.content}
               <button
                 onClick={() => setActiveTab('activity')}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
-                  activeTab === 'activity' ? 'bg-sky-100 text-sky-800' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100'
+                  activeTab === 'activity' ? 'bg-teal-50 text-teal-700 font-medium' : 'text-stone-500 hover:text-stone-700 hover:bg-stone-50'
                 }`}
               >
                 <List className="w-4 h-4" />
@@ -1027,7 +1027,7 @@ ${args.content}
               <button
                 onClick={() => setActiveTab('notes')}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
-                  activeTab === 'notes' ? 'bg-sky-100 text-sky-800' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100'
+                  activeTab === 'notes' ? 'bg-teal-50 text-teal-700 font-medium' : 'text-stone-500 hover:text-stone-700 hover:bg-stone-50'
                 }`}
               >
                 <Bookmark className="w-4 h-4" />
@@ -1037,8 +1037,8 @@ ${args.content}
           </div>
 
           {/* Tab Content */}
-          <div className="flex-1 overflow-y-auto p-6 relative">
-            
+          <div className="flex-1 overflow-y-auto p-6 relative custom-scrollbar">
+
             {/* Transcript Tab */}
             {activeTab === 'transcript' && (
               <div className="flex flex-col gap-4 flex-col-reverse h-full">
@@ -1051,17 +1051,17 @@ ${args.content}
                       transition={{ duration: 0.3, ease: "easeOut" }}
                       className={`p-5 rounded-2xl border ${
                         log.role === 'system'
-                          ? 'bg-slate-50 border-slate-200 text-center'
+                          ? 'bg-stone-50 border-stone-200 text-center'
                           : log.role === 'user'
-                            ? 'bg-sky-50 border-sky-200 ml-12'
-                            : i === 0 
-                              ? 'bg-amber-50 border-amber-200 shadow-lg shadow-amber-100/60 mr-12' 
-                              : 'bg-white border-slate-200 opacity-90 mr-12'
+                            ? 'bg-teal-50 border-teal-200 ml-16'
+                            : i === 0
+                              ? 'bg-white border-stone-200 shadow-sm mr-16'
+                              : 'bg-stone-50 border-stone-100 opacity-70 mr-16'
                       }`}
                     >
                       {log.role !== 'system' && (
                         <div className="flex items-center justify-between mb-3">
-                          <div className="flex items-center gap-2 text-xs text-slate-500">
+                          <div className="flex items-center gap-2 text-xs text-stone-400">
                             {log.role === 'user' ? <User className="w-3 h-3" /> : <Monitor className="w-3 h-3" />}
                             <span className="font-medium">{log.role === 'user' ? 'You' : 'Companion'}</span>
                             <span>•</span>
@@ -1071,18 +1071,18 @@ ${args.content}
                         </div>
                       )}
                       <p className={`text-lg leading-relaxed ${
-                        log.role === 'system' ? 'text-sm text-slate-600' :
-                        i === 0 ? 'text-slate-900' : 'text-slate-700'
+                        log.role === 'system' ? 'text-sm text-stone-400' :
+                        i === 0 ? 'text-stone-800' : 'text-stone-600'
                       }`}>
                         {log.text}
                       </p>
                     </motion.div>
                   ))}
                 </AnimatePresence>
-                
+
                 {logs.length === 0 && (
-                  <div className="flex-1 flex flex-col items-center justify-center text-slate-400 gap-4 h-full">
-                    <MessageSquare className="w-12 h-12 opacity-20" />
+                  <div className="flex-1 flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
+                    <MessageSquare className="w-12 h-12 opacity-15" />
                     <p>No transcript yet. Share your screen and click "Start Companion" to begin.</p>
                   </div>
                 )}
@@ -1093,12 +1093,12 @@ ${args.content}
             {activeTab === 'info' && (
               <div className="h-full">
                 {helpfulInfo ? (
-                  <div className="prose prose-slate max-w-none prose-headings:text-slate-900 prose-strong:text-slate-900 prose-a:text-sky-700">
+                  <div className="prose prose-stone prose-teal max-w-none">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{helpfulInfo}</ReactMarkdown>
                   </div>
                 ) : (
-                  <div className="flex flex-col items-center justify-center text-slate-400 gap-4 h-full">
-                    <BookOpen className="w-12 h-12 opacity-20" />
+                  <div className="flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
+                    <BookOpen className="w-12 h-12 opacity-15" />
                     <p>No helpful info prepped yet. Ask the companion to prepare some information.</p>
                   </div>
                 )}
@@ -1109,12 +1109,12 @@ ${args.content}
             {activeTab === 'activity' && (
               <div className="h-full">
                 {activityLog ? (
-                  <div className="prose prose-slate max-w-none prose-headings:text-slate-900 prose-strong:text-slate-900 prose-a:text-sky-700">
+                  <div className="prose prose-stone prose-teal max-w-none">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{activityLog}</ReactMarkdown>
                   </div>
                 ) : (
-                  <div className="flex flex-col items-center justify-center text-slate-400 gap-4 h-full">
-                    <List className="w-12 h-12 opacity-20" />
+                  <div className="flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
+                    <List className="w-12 h-12 opacity-15" />
                     <p>No activity logged yet. Ask the companion to take minutes of what you are doing.</p>
                   </div>
                 )}
@@ -1125,12 +1125,12 @@ ${args.content}
             {activeTab === 'notes' && (
               <div className="h-full">
                 {savedNotes ? (
-                  <div className="prose prose-slate max-w-none prose-headings:text-slate-900 prose-strong:text-slate-900 prose-a:text-sky-700">
+                  <div className="prose prose-stone prose-teal max-w-none">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{savedNotes}</ReactMarkdown>
                   </div>
                 ) : (
-                  <div className="flex flex-col items-center justify-center text-slate-400 gap-4 h-full">
-                    <Bookmark className="w-12 h-12 opacity-20" />
+                  <div className="flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
+                    <Bookmark className="w-12 h-12 opacity-15" />
                     <p>No notes saved yet. Ask the companion to log a question or save a note.</p>
                   </div>
                 )}
