@@ -1,7 +1,10 @@
+import type { IncomingMessage, ServerResponse } from 'node:http';
+
 import { handleAnalyticsSessionRecapRequest } from '../../../../server/analyticsWebHandlers.js';
+import { runNodeRequestHandler } from '../../../../server/vercelNodeBridge.js';
 
 export const runtime = 'nodejs';
 
-export default function handler(request: Request) {
-  return handleAnalyticsSessionRecapRequest(request);
+export default async function handler(request: IncomingMessage & { body?: unknown }, response: ServerResponse) {
+  await runNodeRequestHandler(request, response, handleAnalyticsSessionRecapRequest);
 }

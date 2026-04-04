@@ -1,7 +1,10 @@
+import type { IncomingMessage, ServerResponse } from 'node:http';
+
 import { handleAnalyticsSessionTimelineRequest } from '../../../../server/analyticsWebHandlers.js';
+import { runNodeRequestHandler } from '../../../../server/vercelNodeBridge.js';
 
 export const runtime = 'nodejs';
 
-export default function handler(request: Request) {
-  return handleAnalyticsSessionTimelineRequest(request);
+export default async function handler(request: IncomingMessage & { body?: unknown }, response: ServerResponse) {
+  await runNodeRequestHandler(request, response, handleAnalyticsSessionTimelineRequest);
 }
