@@ -231,12 +231,12 @@ const TAB_BUTTONS: Array<{
   label: string;
   Icon: React.ComponentType<{ className?: string }>;
 }> = [
-  { id: 'transcript', label: 'Live Transcript', Icon: MessageSquare },
+  { id: 'transcript', label: 'Transcript', Icon: MessageSquare },
   { id: 'info', label: 'Helpful Info', Icon: BookOpen },
-  { id: 'activity', label: 'Activity Log', Icon: List },
-  { id: 'notes', label: 'Saved Notes', Icon: Bookmark },
+  { id: 'activity', label: 'Activity', Icon: List },
+  { id: 'notes', label: 'Notes', Icon: Bookmark },
   { id: 'history', label: 'History', Icon: Clock },
-  { id: 'memory', label: 'Browser Memory', Icon: FileText },
+  { id: 'memory', label: 'Memory', Icon: FileText },
 ];
 
 const MARKDOWN_PROSE_CLASS =
@@ -2434,7 +2434,7 @@ Tool rules:
 	                <button
 	                  key={id}
 	                  onClick={() => setActiveTab(id)}
-	                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
+	                  className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors whitespace-nowrap ${
 	                    activeTab === id
 	                      ? id === 'transcript'
 	                        ? 'bg-stone-100 text-stone-900 font-medium'
