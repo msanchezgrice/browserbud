@@ -7,12 +7,14 @@ import remarkGfm from 'remark-gfm';
 import { DEFAULT_AUTO_SAVE_INTERVAL_MS, buildAutoSavePrompt } from './autoSave';
 import { completeAnalyticsSession, createAnalyticsSession, fetchAnalyticsSessionTimeline, fetchAnalyticsSessions, fetchLatestAnalyticsSessionTimeline, generateAnalyticsSessionRecap, recordAnalyticsEvent, recordAnalyticsMemory, recordAnalyticsTurn } from './analyticsApi';
 import type { AnalyticsMemoryInput, AnalyticsRawEventInput, AnalyticsSessionListItem, AnalyticsSessionTimeline } from './analyticsTypes';
-import { buildRehydratedSessionState, formatActivityLogEntry, formatLatency, mergeIncrementalTranscript, parseStoredLogEntries, serializeLogEntries, shouldCommitUserTranscript, shouldRunTimedBackgroundSave, truncateSessionHandle } from './liveUtils';
+import { createStoredApiKeyController } from './clientConfig';
+import { buildRehydratedSessionState, buildTranscriptFeed, formatActivityLogEntry, formatLatency, mergeIncrementalTranscript, parseStoredLogEntries, serializeLogEntries, shouldCommitUserTranscript, shouldRunTimedBackgroundSave, truncateSessionHandle } from './liveUtils';
+import { buildLocalSessionRecapSummary, getLatestStoredAnalyticsSessionTimeline, getStoredAnalyticsSessionTimeline, listStoredAnalyticsSessions, upsertStoredAnalyticsTimeline } from './localAnalyticsHistory';
 import { getRuntimeSupport } from './runtimeSupport';
 
-const apiKey = process.env.GEMINI_API_KEY;
-const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
+const DEV_DEFAULT_API_KEY = process.env.BROWSERBUD_DEV_DEFAULT_API_KEY || '';
+const TIMED_HELPFUL_INFO_MODEL = 'gemini-2.5-flash';
 
 const STORAGE_KEYS = {
   customPersonas: 'browserbud.customPersonas',
@@ -21,6 +23,8 @@ const STORAGE_KEYS = {
   savedNotes: 'browserbud.savedNotes',
   transcriptLogs: 'browserbud.transcriptLogs',
 };
+
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
 
 const MAX_RECONNECT_ATTEMPTS = 6;
 const AUTO_COMMENTARY_USER_COOLDOWN_MS = 15000;
@@ -32,6 +36,34 @@ const readStoredText = (key: string) => {
   } catch {
     return '';
   }
+};
+
+const getSafeLocalStorage = (): Storage | null => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+};
+
+const readInitialApiKey = (): string => {
+  const controller = createStoredApiKeyController(getSafeLocalStorage());
+  const storedApiKey = controller.get();
+  if (storedApiKey) {
+    return storedApiKey;
+  }
+
+  const fallbackApiKey = DEV_DEFAULT_API_KEY.trim();
+  if (fallbackApiKey) {
+    controller.set(fallbackApiKey);
+    return fallbackApiKey;
+  }
+
+  return '';
 };
 
 type Personality = {
@@ -67,6 +99,7 @@ type LogEntry = {
   timestamp: Date;
   text: string;
   role: 'user' | 'model' | 'system';
+  isDraft?: boolean;
 };
 
 const readStoredLogs = (): LogEntry[] => {
@@ -88,6 +121,71 @@ type DebugState = {
   lastAutoSaveAt: string | null;
   lastCommentaryAt: string | null;
 };
+
+type HelpfulInfoInsertInput = {
+  title?: string | null;
+  content?: string | null;
+  source: 'live-tool' | 'timed-auto-save';
+  logToTranscript?: boolean;
+};
+
+type LocalHistoryCapture = {
+  sessionId: string;
+  startedAt: string;
+  sourceSurface: string | null;
+  personaId: string | null;
+  liveModel: string | null;
+  searchEnabled: boolean;
+  captureMode: string;
+  existingLogIds: Set<string>;
+  helpfulInfoBaseline: string;
+  activityLogBaseline: string;
+  savedNotesBaseline: string;
+};
+
+function mergeHistorySessionItems(
+  primary: AnalyticsSessionListItem[],
+  secondary: AnalyticsSessionListItem[],
+): AnalyticsSessionListItem[] {
+  const merged = new Map<string, AnalyticsSessionListItem>();
+
+  for (const item of [...primary, ...secondary]) {
+    if (!merged.has(item.session.id)) {
+      merged.set(item.session.id, item);
+    }
+  }
+
+  return [...merged.values()].sort((left, right) => right.session.startedAt.localeCompare(left.session.startedAt));
+}
+
+function getPrependedDelta(currentValue: string, baselineValue: string): string {
+  if (!baselineValue) {
+    return currentValue.trim();
+  }
+
+  if (!currentValue || currentValue === baselineValue) {
+    return '';
+  }
+
+  if (currentValue.endsWith(baselineValue)) {
+    return currentValue.slice(0, currentValue.length - baselineValue.length).trim();
+  }
+
+  return currentValue.trim();
+}
+
+function getHistoryUnavailableMessage(hasStoredFallback: boolean): string {
+  const hostname = typeof window === 'undefined' ? '' : window.location.hostname;
+  if (hasStoredFallback) {
+    return 'Showing browser-only session history from this device because the analytics backend is unavailable.';
+  }
+
+  if (LOCAL_HOSTNAMES.has(hostname)) {
+    return 'History backend unavailable. Start `npm run dev:api` for shared session history. Finished sessions will still save in this browser.';
+  }
+
+  return 'History backend unavailable on this deploy right now. Finished sessions will still save in this browser.';
+}
 
 const TAB_METADATA: Record<AppTab, { label: string; toolName: string; description: string; emptyState: string; }> = {
   transcript: {
@@ -116,11 +214,36 @@ const TAB_METADATA: Record<AppTab, { label: string; toolName: string; descriptio
   },
   history: {
     label: 'History & Analysis',
-    toolName: 'Local Analytics API',
-    description: 'Session history, saved context, and recap analysis from the local analytics store.',
-    emptyState: 'No session history yet. Start the local analytics API and run a session to populate this view.',
+    toolName: 'Browser Memory',
+    description: 'Session history, saved context, and recap analysis from the browser memory store.',
+    emptyState: 'No session history yet. Finish a session to populate this view.',
   },
 };
+
+function ListeningIndicator() {
+  return (
+    <div className="inline-flex items-center gap-2 rounded-full border border-teal-200 bg-white/95 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-teal-600 shadow-sm shadow-teal-100/60">
+      <span className="relative flex h-5 w-5 items-center justify-center rounded-full bg-teal-50 text-teal-600">
+        <span className="absolute inline-flex h-5 w-5 rounded-full bg-teal-200/70 animate-ping" />
+        <Mic className="relative h-3 w-3" />
+      </span>
+      <span>Listening</span>
+      <span className="flex items-end gap-0.5" aria-hidden="true">
+        {[0, 1, 2].map((index) => (
+          <span
+            key={index}
+            className="w-0.5 rounded-full bg-teal-500 animate-pulse"
+            style={{
+              height: `${8 + index * 3}px`,
+              animationDelay: `${index * 160}ms`,
+              animationDuration: '900ms',
+            }}
+          />
+        ))}
+      </span>
+    </div>
+  );
+}
 
 export default function App() {
   const [personas, setPersonas] = useState<Personality[]>(() => {
@@ -134,12 +257,14 @@ export default function App() {
   });
 
   const [personality, setPersonality] = useState(personas[0].id);
+  const [userApiKey, setUserApiKey] = useState(() => readInitialApiKey());
   const [commentaryFrequency, setCommentaryFrequency] = useState(0);
   const [frequency, setFrequency] = useState(DEFAULT_AUTO_SAVE_INTERVAL_MS);
   const [isSharing, setIsSharing] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>(() => readStoredLogs());
+  const [liveDraftTranscript, setLiveDraftTranscript] = useState<LogEntry | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
   // Notepad State
@@ -155,6 +280,7 @@ export default function App() {
   
   // Custom Persona State
   const [showAddPersona, setShowAddPersona] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
   const [newPersonaName, setNewPersonaName] = useState('');
   const [newPersonaPrompt, setNewPersonaPrompt] = useState('');
   const [newPersonaVoice, setNewPersonaVoice] = useState(AVAILABLE_VOICES[0]);
@@ -172,6 +298,7 @@ export default function App() {
   const [runtimeSupport, setRuntimeSupport] = useState(() => getRuntimeSupport());
 
   const selectedPersonality = personas.find((option) => option.id === personality) || personas[0];
+  const configuredApiKey = userApiKey.trim();
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -206,6 +333,8 @@ export default function App() {
   const suppressModelOutputRef = useRef(false);
   const analyticsSessionIdRef = useRef<string | null>(null);
   const analyticsEventSeqRef = useRef(0);
+  const localHistoryCaptureRef = useRef<LocalHistoryCapture | null>(null);
+  const timedHelpfulInfoSaveInFlightRef = useRef(false);
   
   // Interval Refs
   const videoIntervalRef = useRef<number | null>(null);
@@ -236,6 +365,10 @@ export default function App() {
   }, [isRunning, selectedPersonality]);
 
   useEffect(() => {
+    createStoredApiKeyController(getSafeLocalStorage()).set(userApiKey);
+  }, [userApiKey]);
+
+  useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.helpfulInfo, helpfulInfo);
   }, [helpfulInfo]);
 
@@ -260,11 +393,12 @@ export default function App() {
     let cancelled = false;
 
     void fetchLatestAnalyticsSessionTimeline().then((timeline) => {
-      if (!timeline || cancelled) {
+      const resolvedTimeline = timeline || readLatestLocalHistoryTimeline();
+      if (!resolvedTimeline || cancelled) {
         return;
       }
 
-      const rehydrated = buildRehydratedSessionState(timeline);
+      const rehydrated = buildRehydratedSessionState(resolvedTimeline);
       const rehydratedLogs = rehydrated.logs.flatMap((entry) => {
         const timestamp = new Date(entry.timestamp);
         if (Number.isNaN(timestamp.getTime())) {
@@ -277,11 +411,17 @@ export default function App() {
       setHelpfulInfo((prev) => (prev.trim() ? prev : rehydrated.helpfulInfo));
       setActivityLog((prev) => (prev.trim() ? prev : rehydrated.activityLog));
       setSavedNotes((prev) => (prev.trim() ? prev : rehydrated.savedNotes));
+      setSelectedHistoryTimeline((prev) => prev || resolvedTimeline);
+      setSelectedHistorySessionId((prev) => prev || resolvedTimeline.session.id);
     });
 
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    void refreshHistorySessions();
   }, []);
 
   useEffect(() => {
@@ -506,26 +646,91 @@ export default function App() {
     });
   };
 
+  const appendHelpfulInfoEntry = ({
+    title,
+    content,
+    source,
+    logToTranscript = true,
+  }: HelpfulInfoInsertInput): boolean => {
+    const normalizedContent = typeof content === 'string' ? content.trim() : '';
+    if (!normalizedContent) {
+      return false;
+    }
+
+    const timestampLabel = new Date().toLocaleTimeString();
+    const normalizedTitle = typeof title === 'string' ? title.trim() : '';
+    const heading = normalizedTitle ? `### [${timestampLabel}] ${normalizedTitle}` : `### [${timestampLabel}] Helpful Info`;
+    const infoEntry = `${heading}\n\n${normalizedContent}\n\n---\n\n`;
+    const eventId = crypto.randomUUID();
+
+    setHelpfulInfo((prev) => infoEntry + prev);
+    if (logToTranscript) {
+      setLogs((prev) => [{
+        id: Math.random().toString(36).substring(7),
+        timestamp: new Date(),
+        text: source === 'timed-auto-save'
+          ? '[Action]: Auto-saved helpful info from the current screen.'
+          : '[Action]: Added helpful info to the Helpful Info tab.',
+        role: 'system',
+      }, ...prev]);
+    }
+
+    recordAnalyticsEventSafe({
+      id: eventId,
+      source: 'browserbud-ui',
+      eventType: source === 'timed-auto-save' ? 'tool.helpful_info_auto_saved' : 'tool.helpful_info_saved',
+      payload: {
+        title: normalizedTitle || 'Helpful Info',
+        content: normalizedContent,
+        source,
+      },
+    });
+    recordAnalyticsMemorySafe({
+      memoryType: 'helpful_info',
+      title: normalizedTitle || 'Helpful Info',
+      bodyMd: normalizedContent,
+      sourceEventIds: [eventId],
+    });
+
+    return true;
+  };
+
+  const readLocalHistorySessions = (limit = 20) => {
+    return listStoredAnalyticsSessions(getSafeLocalStorage(), limit);
+  };
+
+  const readLocalHistoryTimeline = (sessionId: string) => {
+    return getStoredAnalyticsSessionTimeline(getSafeLocalStorage(), sessionId);
+  };
+
+  const readLatestLocalHistoryTimeline = () => {
+    return getLatestStoredAnalyticsSessionTimeline(getSafeLocalStorage());
+  };
+
+  const persistLocalHistoryTimeline = (timeline: AnalyticsSessionTimeline) => {
+    upsertStoredAnalyticsTimeline(getSafeLocalStorage(), timeline);
+  };
+
   const refreshHistorySessions = async () => {
     setHistoryLoading(true);
     setHistoryError(null);
 
     const response = await fetchAnalyticsSessions(20);
+    const localSessions = readLocalHistorySessions(20);
     if (!response) {
-      setHistorySessions([]);
-      setSelectedHistoryTimeline(null);
-      setSelectedHistorySessionId(null);
-      setHistoryError('Local analytics API unavailable. Start `npm run dev:api` to see session history here.');
+      setHistorySessions(localSessions);
+      setHistoryError(getHistoryUnavailableMessage(localSessions.length > 0));
       setHistoryLoading(false);
       return;
     }
 
-    setHistorySessions(response.sessions);
+    setHistorySessions(mergeHistorySessionItems(response.sessions, localSessions));
     setSelectedHistorySessionId((current) => {
-      if (current && response.sessions.some((item) => item.session.id === current)) {
+      const mergedSessions = mergeHistorySessionItems(response.sessions, localSessions);
+      if (current && mergedSessions.some((item) => item.session.id === current)) {
         return current;
       }
-      return response.sessions[0]?.session.id ?? null;
+      return mergedSessions[0]?.session.id ?? null;
     });
     setHistoryLoading(false);
   };
@@ -536,8 +741,9 @@ export default function App() {
 
     const timeline = await fetchAnalyticsSessionTimeline(sessionId);
     if (!timeline) {
-      setSelectedHistoryTimeline(null);
-      setHistoryError('Unable to load the selected session timeline from the local analytics API.');
+      const localTimeline = readLocalHistoryTimeline(sessionId);
+      setSelectedHistoryTimeline(localTimeline);
+      setHistoryError(localTimeline ? null : 'Unable to load the selected session timeline right now.');
       setHistoryLoading(false);
       return;
     }
@@ -565,10 +771,11 @@ export default function App() {
     const sharedStream = videoRef.current?.srcObject as MediaStream | null;
     const sharedTrack = sharedStream?.getVideoTracks?.()[0] || null;
     const sourceSurface = sharedTrack?.getSettings?.().displaySurface || sharedTrack?.label || 'unknown';
+    const startedAt = new Date().toISOString();
 
     void createAnalyticsSession({
       id: sessionId,
-      startedAt: new Date().toISOString(),
+      startedAt,
       sourceSurface,
       personaId: selectedPersonality.id,
       liveModel: LIVE_MODEL,
@@ -589,6 +796,20 @@ export default function App() {
       },
     }, sessionId);
 
+    localHistoryCaptureRef.current = {
+      sessionId,
+      startedAt,
+      sourceSurface,
+      personaId: selectedPersonality.id,
+      liveModel: LIVE_MODEL,
+      searchEnabled: sessionSearchEnabled,
+      captureMode: 'screen-share',
+      existingLogIds: new Set(logs.map((entry) => entry.id)),
+      helpfulInfoBaseline: helpfulInfo,
+      activityLogBaseline: activityLog,
+      savedNotesBaseline: savedNotes,
+    };
+
     if (activeTab === 'history') {
       void refreshHistorySessions();
     }
@@ -596,6 +817,7 @@ export default function App() {
 
   const finalizeAnalyticsSession = async (reason: string, { skipRecap = false }: { skipRecap?: boolean } = {}) => {
     const sessionId = analyticsSessionIdRef.current;
+    const localHistoryCapture = localHistoryCaptureRef.current;
     if (!sessionId) {
       return;
     }
@@ -610,9 +832,144 @@ export default function App() {
 
     analyticsSessionIdRef.current = null;
     analyticsEventSeqRef.current = 0;
+    localHistoryCaptureRef.current = null;
+
+    const localTurns = localHistoryCapture
+      ? logs
+        .filter((entry) => !localHistoryCapture.existingLogIds.has(entry.id) && (entry.role === 'user' || entry.role === 'model'))
+        .slice()
+        .reverse()
+        .map((entry) => ({
+          id: entry.id,
+          sessionId,
+          role: entry.role,
+          startedAt: entry.timestamp.toISOString(),
+          endedAt: entry.timestamp.toISOString(),
+          transcript: entry.text,
+          promptKind: entry.role === 'user' ? 'user-voice' : 'live-response',
+          modelName: entry.role === 'model' ? LIVE_MODEL : null,
+          relatedEventId: null,
+        }))
+      : [];
+
+    const localMemories = localHistoryCapture
+      ? [
+        getPrependedDelta(helpfulInfo, localHistoryCapture.helpfulInfoBaseline)
+          ? {
+            id: `${sessionId}-helpful-info`,
+            sessionId,
+            memoryType: 'helpful_info',
+            title: 'Helpful Info',
+            bodyMd: getPrependedDelta(helpfulInfo, localHistoryCapture.helpfulInfoBaseline),
+            sourceUrl: null,
+            sourceEventIds: [],
+            sourceTurnIds: [],
+            embeddingModel: null,
+            embeddingJson: null,
+            createdAt: endedAt,
+          }
+          : null,
+        getPrependedDelta(activityLog, localHistoryCapture.activityLogBaseline)
+          ? {
+            id: `${sessionId}-activity-log`,
+            sessionId,
+            memoryType: 'activity_log',
+            title: 'Activity Log',
+            bodyMd: getPrependedDelta(activityLog, localHistoryCapture.activityLogBaseline),
+            sourceUrl: null,
+            sourceEventIds: [],
+            sourceTurnIds: [],
+            embeddingModel: null,
+            embeddingJson: null,
+            createdAt: endedAt,
+          }
+          : null,
+        getPrependedDelta(savedNotes, localHistoryCapture.savedNotesBaseline)
+          ? {
+            id: `${sessionId}-saved-notes`,
+            sessionId,
+            memoryType: 'saved_note',
+            title: 'Saved Notes',
+            bodyMd: getPrependedDelta(savedNotes, localHistoryCapture.savedNotesBaseline),
+            sourceUrl: null,
+            sourceEventIds: [],
+            sourceTurnIds: [],
+            embeddingModel: null,
+            embeddingJson: null,
+            createdAt: endedAt,
+          }
+          : null,
+      ].filter(Boolean)
+      : [];
+
+    const persistLocalSession = (summary: AnalyticsSessionTimeline['summaries'][number] | null) => {
+      if (!localHistoryCapture) {
+        return;
+      }
+
+      persistLocalHistoryTimeline({
+        session: {
+          id: sessionId,
+          startedAt: localHistoryCapture.startedAt,
+          endedAt,
+          sourceSurface: localHistoryCapture.sourceSurface,
+          personaId: localHistoryCapture.personaId,
+          liveModel: localHistoryCapture.liveModel,
+          searchEnabled: localHistoryCapture.searchEnabled,
+          captureMode: localHistoryCapture.captureMode,
+          createdAt: localHistoryCapture.startedAt,
+        },
+        events: [
+          {
+            id: `${sessionId}-started`,
+            sessionId,
+            seq: 0,
+            source: 'browserbud-ui',
+            eventType: 'session.started',
+            occurredAt: localHistoryCapture.startedAt,
+            endedAt: null,
+            appName: 'BrowserBud',
+            windowTitle: null,
+            tabId: null,
+            url: null,
+            domain: null,
+            pageTitle: localHistoryCapture.personaId,
+            payload: {
+              searchEnabled: localHistoryCapture.searchEnabled,
+              localFallback: true,
+            },
+            privacyTier: 'standard',
+          },
+          {
+            id: `${sessionId}-stopped`,
+            sessionId,
+            seq: 1,
+            source: 'browserbud-ui',
+            eventType: 'session.stopped',
+            occurredAt: endedAt,
+            endedAt,
+            appName: 'BrowserBud',
+            windowTitle: null,
+            tabId: null,
+            url: null,
+            domain: null,
+            pageTitle: localHistoryCapture.personaId,
+            payload: {
+              reason,
+              localFallback: true,
+            },
+            privacyTier: 'standard',
+          },
+        ],
+        turns: localTurns,
+        memories: localMemories,
+        summaries: summary ? [summary] : [],
+      });
+    };
 
     if (skipRecap) {
       void completeAnalyticsSession(sessionId, endedAt);
+      persistLocalSession(null);
       if (activeTab === 'history') {
         void refreshHistorySessions();
       }
@@ -620,21 +977,43 @@ export default function App() {
     }
 
     const recapResponse = await generateAnalyticsSessionRecap(sessionId, endedAt);
+    const summary = recapResponse?.summary || (localHistoryCapture
+      ? buildLocalSessionRecapSummary({
+        session: {
+          id: sessionId,
+          startedAt: localHistoryCapture.startedAt,
+          endedAt,
+          sourceSurface: localHistoryCapture.sourceSurface,
+          personaId: localHistoryCapture.personaId,
+          liveModel: localHistoryCapture.liveModel,
+          searchEnabled: localHistoryCapture.searchEnabled,
+          captureMode: localHistoryCapture.captureMode,
+          createdAt: localHistoryCapture.startedAt,
+        },
+        turns: localTurns,
+        memories: localMemories,
+        createdAt: endedAt,
+      })
+      : null);
+
     if (!recapResponse?.summary) {
       void completeAnalyticsSession(sessionId, endedAt);
-      return;
     }
 
-    const timestamp = new Date();
-    const recapBody = recapResponse.summary.markdown.replace(/^# Session Recap\s*/i, '').trim();
-    const recapEntry = `### [${timestamp.toLocaleTimeString()}] Session Recap\n\n${recapBody}\n\n---\n\n`;
-    setHelpfulInfo((prev) => recapEntry + prev);
-    setLogs((prev) => [{
-      id: Math.random().toString(36).slice(2),
-      timestamp,
-      text: '[Action]: Saved a session recap to the Helpful Info tab.',
-      role: 'system',
-    }, ...prev]);
+    persistLocalSession(summary);
+
+    if (summary) {
+      const timestamp = new Date();
+      const recapBody = summary.markdown.replace(/^# Session Recap\s*/i, '').trim();
+      const recapEntry = `### [${timestamp.toLocaleTimeString()}] Session Recap\n\n${recapBody}\n\n---\n\n`;
+      setHelpfulInfo((prev) => recapEntry + prev);
+      setLogs((prev) => [{
+        id: Math.random().toString(36).slice(2),
+        timestamp,
+        text: '[Action]: Saved a session recap to the Helpful Info tab.',
+        role: 'system',
+      }, ...prev]);
+    }
 
     if (activeTab === 'history') {
       void refreshHistorySessions();
@@ -682,7 +1061,7 @@ export default function App() {
     });
   };
 
-  const maybeTriggerTimedHelpfulInfoSave = () => {
+  const maybeTriggerTimedHelpfulInfoSave = async () => {
     if (!shouldRunTimedBackgroundSave({
       frequencyMs: frequency,
       nowMs: Date.now(),
@@ -697,7 +1076,92 @@ export default function App() {
       return;
     }
 
-    sendSessionPrompt(buildAutoSavePrompt(), { kind: 'auto-save', suppressOutput: true });
+    const frameBase64 = captureFrame();
+    if (!frameBase64 || !configuredApiKey || timedHelpfulInfoSaveInFlightRef.current) {
+      return;
+    }
+
+    timedHelpfulInfoSaveInFlightRef.current = true;
+    pendingToolCallRef.current = true;
+    lastPromptAtRef.current = Date.now();
+    setDebugState((prev) => ({
+      ...prev,
+      lastAutoSaveAt: new Date().toLocaleTimeString(),
+    }));
+
+    try {
+      const aiClient = new GoogleGenAI({ apiKey: configuredApiKey });
+      const response = await aiClient.models.generateContent({
+        model: TIMED_HELPFUL_INFO_MODEL,
+        contents: [{
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                data: frameBase64,
+                mimeType: 'image/jpeg',
+              },
+            },
+            {
+              text: [
+                buildAutoSavePrompt(),
+                'Look only at the attached screenshot from the current browsing session.',
+                'Return concise markdown that would still be useful when reopened later.',
+                'Prefer specific observations, likely intent, next steps, links or entities visible on screen, and anything worth remembering.',
+              ].join(' '),
+            },
+          ],
+        }],
+        config: {
+          temperature: 0.2,
+          maxOutputTokens: 220,
+          responseMimeType: 'application/json',
+          responseJsonSchema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              title: {
+                type: 'string',
+                description: 'Short title for the saved helpful info entry.',
+              },
+              content: {
+                type: 'string',
+                description: 'Concise markdown content about what matters on the current screen.',
+              },
+            },
+            required: ['content'],
+          },
+        },
+      });
+
+      let parsed: { title?: string; content?: string } | null = null;
+      try {
+        parsed = response.text ? JSON.parse(response.text) as { title?: string; content?: string } : null;
+      } catch {
+        parsed = null;
+      }
+
+      const inserted = appendHelpfulInfoEntry({
+        title: parsed?.title,
+        content: parsed?.content || response.text,
+        source: 'timed-auto-save',
+        logToTranscript: false,
+      });
+
+      if (!inserted && response.text?.trim()) {
+        appendHelpfulInfoEntry({
+          title: 'Helpful Info',
+          content: response.text,
+          source: 'timed-auto-save',
+          logToTranscript: false,
+        });
+      }
+    } catch (error) {
+      console.error('Timed helpful info save failed', error);
+    } finally {
+      pendingToolCallRef.current = false;
+      timedHelpfulInfoSaveInFlightRef.current = false;
+    }
   };
 
   const maybeTriggerTimedCommentary = () => {
@@ -732,7 +1196,9 @@ export default function App() {
     pendingToolCallRef.current = false;
     currentInputTranscriptRef.current = '';
     currentOutputTranscriptRef.current = '';
+    setLiveDraftTranscript(null);
     suppressModelOutputRef.current = false;
+    timedHelpfulInfoSaveInFlightRef.current = false;
     lastPromptAtRef.current = 0;
     firstAudioChunkSeenRef.current = false;
     sessionStartTimeRef.current = null;
@@ -831,12 +1297,12 @@ export default function App() {
       return;
     }
 
-    if (!apiKey || !ai) {
-      alert('Missing GEMINI_API_KEY. Add it to your environment and restart the app.');
+    if (!configuredApiKey) {
+      alert('Add your Gemini API key in the BYO key field before starting BrowserBud.');
       return;
     }
 
-    console.debug('Start live requested', { isSharing, hasApiKey: Boolean(apiKey), isReconnect });
+    console.debug('Start live requested', { isSharing, hasApiKey: Boolean(configuredApiKey), isReconnect });
     isStartingRef.current = true;
     isStoppingRef.current = false;
     setErrorMsg(null);
@@ -857,6 +1323,7 @@ export default function App() {
     }));
 
     try {
+      const aiClient = new GoogleGenAI({ apiKey: configuredApiKey });
       const micStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
       console.debug('Microphone stream acquired', { tracks: micStream.getTracks().length });
       micStreamRef.current = micStream;
@@ -875,10 +1342,12 @@ export default function App() {
       const commitUserTurn = () => {
         const text = currentInputTranscriptRef.current.trim();
         if (!text) {
+          setLiveDraftTranscript(null);
           return;
         }
 
         const completedAt = new Date();
+        setLiveDraftTranscript(null);
         setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: completedAt, text, role: 'user' }, ...prev]);
         recordAnalyticsTurnSafe({
           id: crypto.randomUUID(),
@@ -1014,7 +1483,7 @@ Tool rules:
         config.systemInstruction.parts[0].text += '\n- Google Search is disabled for this session. Answer from the visible context unless the user explicitly asks you to search later.';
       }
 
-      const sessionPromise = ai.live.connect({
+      const sessionPromise = aiClient.live.connect({
         model: LIVE_MODEL,
         config,
         callbacks: {
@@ -1150,6 +1619,14 @@ Tool rules:
               lastUserActivityAtRef.current = Date.now();
               pendingTurnRef.current = true;
               currentInputTranscriptRef.current = mergeIncrementalTranscript(currentInputTranscriptRef.current, inputTranscription.text);
+              const draftText = currentInputTranscriptRef.current.trim();
+              setLiveDraftTranscript(draftText ? {
+                id: 'draft-user',
+                timestamp: new Date(),
+                text: draftText,
+                role: 'user',
+                isDraft: true,
+              } : null);
             }
 
             const parts = message.serverContent?.modelTurn?.parts;
@@ -1229,26 +1706,10 @@ Tool rules:
 
                   if (call.name === 'appendHelpfulInfo') {
                     const args = call.args as any;
-                    const title = args.title?.trim();
-                    const heading = title ? `### [${timestamp}] ${title}` : `### [${timestamp}] Helpful Info`;
-                    const infoEntry = `${heading}\n\n${args.content}\n\n---\n\n`;
-                    const eventId = crypto.randomUUID();
-                    setHelpfulInfo((prev) => infoEntry + prev);
-                    setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Added helpful info to the Helpful Info tab.', role: 'system' }, ...prev]);
-                    recordAnalyticsEventSafe({
-                      id: eventId,
-                      source: 'browserbud-ui',
-                      eventType: 'tool.helpful_info_saved',
-                      payload: {
-                        title: title || 'Helpful Info',
-                        content: args.content,
-                      },
-                    });
-                    recordAnalyticsMemorySafe({
-                      memoryType: 'helpful_info',
-                      title: title || 'Helpful Info',
-                      bodyMd: args.content,
-                      sourceEventIds: [eventId],
+                    appendHelpfulInfoEntry({
+                      title: args.title,
+                      content: args.content,
+                      source: 'live-tool',
                     });
                     functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
                   } else if (call.name === 'logActivity') {
@@ -1386,7 +1847,7 @@ Tool rules:
   };
 
   const toggleRunning = () => {
-    console.debug('Toggle running clicked', { isSharing, isRunning, hasApiKey: Boolean(apiKey) });
+    console.debug('Toggle running clicked', { isSharing, isRunning, hasApiKey: Boolean(configuredApiKey) });
     if (!isRunning) {
       void startLive();
     } else {
@@ -1410,6 +1871,36 @@ Tool rules:
   const historyTurns = selectedHistoryTimeline ? [...selectedHistoryTimeline.turns].reverse().slice(0, 6) : [];
   const historyEvents = selectedHistoryTimeline ? [...selectedHistoryTimeline.events].reverse().slice(0, 8) : [];
   const historyMemories = selectedHistoryTimeline ? selectedHistoryTimeline.memories.slice(0, 8) : [];
+  const transcriptFeed = buildTranscriptFeed(
+    logs.map((log) => ({
+      id: log.id,
+      timestamp: log.timestamp.toISOString(),
+      text: log.text,
+      role: log.role,
+    })),
+    liveDraftTranscript ? {
+      timestamp: liveDraftTranscript.timestamp.toISOString(),
+      text: liveDraftTranscript.text,
+      role: liveDraftTranscript.role,
+    } : null,
+  ).flatMap((entry) => {
+    const timestamp = new Date(entry.timestamp);
+    if (Number.isNaN(timestamp.getTime())) {
+      return [];
+    }
+
+    return [{
+      ...entry,
+      timestamp,
+    }];
+  });
+  const latestHistorySession = historySessions[0] || null;
+  const latestHistorySummary = latestHistorySession?.latestSummary
+    || selectedHistoryTimeline?.summaries.find((summary) => summary.summaryKind === 'session_recap')
+    || null;
+  const latestHistorySummaryPreview = latestHistorySummary
+    ? latestHistorySummary.markdown.replace(/^# Session Recap\s*/i, '').trim()
+    : '';
 
   if (!runtimeSupport.supported) {
     return (
@@ -1481,7 +1972,7 @@ Tool rules:
                 BrowserBud
               </h1>
               <p className="text-sm text-stone-500">
-                Your AI browsing assistant — watches your screen, takes notes, and answers questions while you work.
+                BYO Gemini key alpha for turning live browsing into recaps, saved context, and session history.
               </p>
             </div>
             {errorMsg && (
@@ -1492,6 +1983,49 @@ Tool rules:
           </div>
 
           <div className="bg-white border border-[#E8E5E0] rounded-xl p-5 space-y-6 shadow-sm">
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-stone-700 flex items-center gap-2">
+                  <Settings className="w-4 h-4 text-stone-400" />
+                  Bring Your Own Gemini Key
+                </label>
+                <button
+                  onClick={() => setUserApiKey('')}
+                  className="text-xs text-stone-400 hover:text-stone-600 transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
+
+              <div className="rounded-xl border border-stone-200 bg-stone-50 p-4 space-y-3">
+                <input
+                  type={showApiKey ? 'text' : 'password'}
+                  value={userApiKey}
+                  onChange={(event) => setUserApiKey(event.target.value)}
+                  placeholder="Paste your Gemini API key"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2.5 text-sm text-stone-800 focus:outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500/20"
+                />
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-stone-500">
+                  <div>
+                    {configuredApiKey ? 'Stored locally in this browser.' : 'Required to start the companion.'}
+                  </div>
+                  <button
+                    onClick={() => setShowApiKey((current) => !current)}
+                    className="rounded-full border border-stone-200 bg-white px-3 py-1 font-medium text-stone-600 transition-colors hover:bg-stone-100"
+                  >
+                    {showApiKey ? 'Hide key' : 'Show key'}
+                  </button>
+                </div>
+              </div>
+
+              <p className="text-xs text-stone-500">
+                Alpha mode: BrowserBud uses your Gemini key directly from this device. Managed accounts and hosted billing come later.
+              </p>
+            </div>
 
             {/* Screen Share Preview */}
             <div className="space-y-3">
@@ -1696,9 +2230,9 @@ Tool rules:
             <div className="pt-4 border-t border-stone-200 flex gap-3">
               <button
                 onClick={toggleRunning}
-                disabled={!isSharing}
+                disabled={!isSharing || !configuredApiKey}
                 className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-medium transition-all ${
-                  !isSharing
+                  !isSharing || !configuredApiKey
                     ? 'bg-stone-100 text-stone-400 cursor-not-allowed'
                     : isRunning
                       ? 'bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200'
@@ -1706,7 +2240,7 @@ Tool rules:
                 }`}
               >
                 {isRunning ? <Square className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
-                {isRunning ? 'Stop Companion' : 'Start Companion'}
+                {isRunning ? 'Stop Companion' : configuredApiKey ? 'Start Companion' : 'Add Key to Start'}
               </button>
 
               <button
@@ -1777,6 +2311,53 @@ Tool rules:
                   </div>
                 </div>
               </div>
+
+              <div className="rounded-2xl border border-teal-200 bg-teal-50/80 px-4 py-4">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="max-w-2xl">
+                    <div className="text-[11px] uppercase tracking-[0.16em] text-teal-700">Browser Memory</div>
+                    <h3 className="mt-1 text-lg font-semibold text-stone-900">Make the recap the product</h3>
+                    <p className="mt-2 text-sm leading-6 text-stone-600">
+                      BrowserBud should leave you with a reusable record: saved notes, structured activity, and a session recap you can reopen later.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-xs text-stone-600">
+                    <div className="rounded-xl border border-teal-200 bg-white px-3 py-2">
+                      <div className="uppercase tracking-[0.14em] text-stone-400">Sessions</div>
+                      <div className="mt-1 text-sm font-semibold text-stone-900">{historySessions.length}</div>
+                    </div>
+                    <div className="rounded-xl border border-teal-200 bg-white px-3 py-2">
+                      <div className="uppercase tracking-[0.14em] text-stone-400">Saved Items</div>
+                      <div className="mt-1 text-sm font-semibold text-stone-900">{selectedHistoryTimeline?.memories.length ?? 0}</div>
+                    </div>
+                    <div className="rounded-xl border border-teal-200 bg-white px-3 py-2">
+                      <div className="uppercase tracking-[0.14em] text-stone-400">Turns</div>
+                      <div className="mt-1 text-sm font-semibold text-stone-900">{selectedHistoryTimeline?.turns.length ?? logs.length}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => setActiveTab('history')}
+                    className="rounded-full bg-teal-600 px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-white transition-colors hover:bg-teal-700"
+                  >
+                    Open History
+                  </button>
+                  <div className="rounded-full border border-teal-200 bg-white px-3 py-2 text-xs text-stone-500">
+                    {latestHistorySummary ? 'Latest recap ready' : 'Your next finished session will generate a recap'}
+                  </div>
+                </div>
+
+                {latestHistorySummaryPreview && (
+                  <div className="mt-4 rounded-xl border border-teal-200 bg-white px-4 py-3">
+                    <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Latest recap preview</div>
+                    <p className="mt-2 text-sm leading-6 text-stone-700">
+                      {latestHistorySummaryPreview}
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
             <div className="flex gap-1 overflow-x-auto custom-scrollbar pb-2">
               <button
@@ -1843,44 +2424,81 @@ Tool rules:
             {activeTab === 'transcript' && (
               <div className="min-h-full flex flex-col-reverse gap-4">
                 <AnimatePresence initial={false}>
-                  {logs.map((log, i) => (
-                    <motion.div
-                      key={log.id}
-                      initial={{ opacity: 0, y: -20, scale: 0.95 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      transition={{ duration: 0.3, ease: "easeOut" }}
-                      className={`p-5 rounded-2xl border ${
-                        log.role === 'system'
-                          ? 'bg-stone-50 border-stone-200 text-center'
-                          : log.role === 'user'
-                            ? 'bg-teal-50 border-teal-200 ml-16'
-                            : i === 0
-                              ? 'bg-white border-stone-200 shadow-sm mr-16'
-                              : 'bg-stone-50 border-stone-100 opacity-70 mr-16'
-                      }`}
-                    >
-                      {log.role !== 'system' && (
-                        <div className="flex items-center justify-between mb-3">
-                          <div className="flex items-center gap-2 text-xs text-stone-400">
-                            {log.role === 'user' ? <User className="w-3 h-3" /> : <Monitor className="w-3 h-3" />}
-                            <span className="font-medium">{log.role === 'user' ? 'You' : 'Companion'}</span>
-                            <span>•</span>
-                            <Clock className="w-3 h-3" />
-                            {log.timestamp.toLocaleTimeString()}
+                  {transcriptFeed.map((log, i) => {
+                    const isSystem = log.role === 'system';
+                    const isUser = log.role === 'user';
+                    const isDraft = Boolean(log.isDraft);
+                    const isNewestCompanion = log.role === 'model' && i === 0;
+                    const Icon = isSystem ? Settings : isUser ? User : Monitor;
+                    const label = isSystem ? 'System' : isUser ? 'You' : 'Companion';
+                    const cardClassName = isSystem
+                      ? 'border-stone-200 bg-stone-50/90 text-center'
+                      : isDraft
+                        ? 'ml-10 border-teal-300 border-dashed bg-teal-50/80 shadow-sm shadow-teal-100/70 sm:ml-16'
+                      : isUser
+                        ? 'ml-10 border-teal-300 bg-teal-50 shadow-sm shadow-teal-100/60 sm:ml-16'
+                        : isNewestCompanion
+                          ? 'mr-10 border-stone-300 bg-white shadow-md shadow-stone-200/70 sm:mr-16'
+                          : 'mr-10 border-stone-200 bg-stone-50 sm:mr-16';
+                    const badgeClassName = isSystem
+                      ? 'border-stone-200 bg-white text-stone-500'
+                      : isDraft
+                        ? 'border-teal-200 bg-white text-teal-700'
+                      : isUser
+                        ? 'border-teal-200 bg-white text-teal-700'
+                        : 'border-stone-200 bg-white text-stone-600';
+                    const bodyClassName = isSystem
+                      ? 'text-sm text-stone-500'
+                      : isDraft
+                        ? 'text-[17px] font-medium text-teal-950'
+                      : isUser
+                        ? 'text-[17px] font-medium text-teal-950'
+                        : isNewestCompanion
+                          ? 'text-lg text-stone-900'
+                          : 'text-lg text-stone-700';
+
+                    return (
+                      <motion.div
+                        key={log.id}
+                        initial={{ opacity: 0, y: -20, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        transition={{ duration: 0.3, ease: "easeOut" }}
+                        className={`rounded-2xl border p-5 ${cardClassName}`}
+                      >
+                        <div className={`mb-3 flex items-center ${isSystem ? 'justify-center' : 'justify-between'} gap-3`}>
+                          <div className="flex items-center gap-2.5">
+                            <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${badgeClassName}`}>
+                              <Icon className="h-3.5 w-3.5" />
+                              {label}
+                            </div>
+                            {isDraft && (
+                              <ListeningIndicator />
+                            )}
+                            {!isSystem && (
+                              <div className="flex items-center gap-1.5 text-xs text-stone-400">
+                                <Clock className="h-3 w-3" />
+                                {log.timestamp.toLocaleTimeString()}
+                              </div>
+                            )}
                           </div>
+
+                          {isSystem && (
+                            <div className="flex items-center gap-1.5 text-xs text-stone-400">
+                              <Clock className="h-3 w-3" />
+                              {log.timestamp.toLocaleTimeString()}
+                            </div>
+                          )}
                         </div>
-                      )}
-                      <p className={`text-lg leading-relaxed ${
-                        log.role === 'system' ? 'text-sm text-stone-400' :
-                        i === 0 ? 'text-stone-800' : 'text-stone-600'
-                      }`}>
-                        {log.text}
-                      </p>
-                    </motion.div>
-                  ))}
+
+                        <p className={`leading-relaxed ${bodyClassName}`}>
+                          {log.text}
+                        </p>
+                      </motion.div>
+                    );
+                  })}
                 </AnimatePresence>
 
-                {logs.length === 0 && (
+                {transcriptFeed.length === 0 && (
                   <div className="flex-1 flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
                     <MessageSquare className="w-12 h-12 opacity-15" />
                     <p>{TAB_METADATA.transcript.emptyState}</p>

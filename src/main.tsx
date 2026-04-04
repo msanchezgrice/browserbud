@@ -1,23 +1,20 @@
-import { StrictMode, useEffect, useState } from 'react';
+import { StrictMode, Suspense, lazy, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import App from './App.tsx';
-import Landing from './Landing.tsx';
+import { resolveAppSurface, type AppSurface } from './appSurface';
 import './index.css';
 
-type Route = 'landing' | 'app';
+const App = lazy(() => import('./App.tsx'));
+const Landing = lazy(() => import('./Landing.tsx'));
 
-function getRoute(): Route {
-  if (window.location.pathname === '/app' || window.location.pathname.startsWith('/app/')) {
-    return 'app';
-  }
+function getRoute(): AppSurface {
   if (window.location.hash === '#/app') {
-    return 'app';
+    return resolveAppSurface('/app');
   }
-  return 'landing';
+  return resolveAppSurface(window.location.pathname);
 }
 
 function Router() {
-  const [route, setRoute] = useState<Route>(() => getRoute());
+  const [route, setRoute] = useState<AppSurface>(() => getRoute());
 
   useEffect(() => {
     const syncRoute = () => {
@@ -37,8 +34,17 @@ function Router() {
     };
   }, []);
 
-  if (route === 'app') return <App />;
-  return <Landing />;
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-[#FAFAF8] text-sm text-stone-500">
+          Loading BrowserBud…
+        </div>
+      }
+    >
+      {route === 'app' ? <App /> : <Landing />}
+    </Suspense>
+  );
 }
 
 createRoot(document.getElementById('root')!).render(

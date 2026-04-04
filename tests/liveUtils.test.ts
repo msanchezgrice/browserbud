@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildTranscriptFeed,
   buildRehydratedSessionState,
   buildTimedHelpfulInfoPrompt,
   formatActivityLogEntry,
@@ -123,6 +124,51 @@ test('buildTimedHelpfulInfoPrompt requests tool-only background saving', () => {
   assert.match(prompt, /Do not speak/i);
   assert.match(prompt, /exactly once/i);
   assert.match(prompt, /little changed/i);
+});
+
+test('buildTranscriptFeed prepends a live draft transcript entry', () => {
+  const feed = buildTranscriptFeed(
+    [
+      {
+        id: 'log_1',
+        timestamp: '2026-04-04T00:00:00.000Z',
+        text: 'Companion reply',
+        role: 'model',
+      },
+    ],
+    {
+      timestamp: '2026-04-04T00:00:05.000Z',
+      text: 'I am still talking',
+      role: 'user',
+    },
+  );
+
+  assert.equal(feed.length, 2);
+  assert.equal(feed[0].isDraft, true);
+  assert.equal(feed[0].role, 'user');
+  assert.equal(feed[0].text, 'I am still talking');
+  assert.equal(feed[1].id, 'log_1');
+});
+
+test('buildTranscriptFeed omits empty draft transcript entries', () => {
+  const feed = buildTranscriptFeed(
+    [
+      {
+        id: 'log_1',
+        timestamp: '2026-04-04T00:00:00.000Z',
+        text: 'Companion reply',
+        role: 'model',
+      },
+    ],
+    {
+      timestamp: '2026-04-04T00:00:05.000Z',
+      text: '   ',
+      role: 'user',
+    },
+  );
+
+  assert.equal(feed.length, 1);
+  assert.equal(feed[0].id, 'log_1');
 });
 
 test('shouldCommitUserTranscript finalizes when input transcription explicitly finishes', () => {

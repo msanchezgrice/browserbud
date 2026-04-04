@@ -15,6 +15,10 @@ export type PersistedLogEntry = {
   role: 'user' | 'model' | 'system';
 };
 
+export type TranscriptFeedEntry = PersistedLogEntry & {
+  isDraft?: boolean;
+};
+
 export type TimedBackgroundSaveInput = {
   frequencyMs: number;
   nowMs: number;
@@ -149,6 +153,27 @@ export function parseStoredLogEntries(raw: string | null | undefined): Persisted
   } catch {
     return [];
   }
+}
+
+export function buildTranscriptFeed(
+  logs: PersistedLogEntry[],
+  draft?: Omit<PersistedLogEntry, 'id'> | null,
+): TranscriptFeedEntry[] {
+  const draftText = cleanField(draft?.text);
+  if (!draft || !draftText) {
+    return logs;
+  }
+
+  return [
+    {
+      id: `draft-${draft.role}`,
+      timestamp: draft.timestamp,
+      text: draftText,
+      role: draft.role,
+      isDraft: true,
+    },
+    ...logs,
+  ];
 }
 
 export function shouldRunTimedBackgroundSave(input: TimedBackgroundSaveInput): boolean {

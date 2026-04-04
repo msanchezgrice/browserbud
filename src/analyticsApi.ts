@@ -8,33 +8,15 @@ import type {
   AnalyticsSummaryRecord,
   SessionRecapPayload,
 } from './analyticsTypes';
+import { resolveAnalyticsApiUrl } from './clientConfig';
 
-function resolveAnalyticsApiUrl(): string | null {
-  const configuredUrl = process.env.BROWSERBUD_LOCAL_API_URL?.trim();
-  if (configuredUrl) {
-    return configuredUrl;
-  }
-
-  if (typeof window === 'undefined') {
-    return 'http://127.0.0.1:3011/api/analytics';
-  }
-
-  const hostname = window.location.hostname;
-  const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
-  if (window.location.protocol === 'http:' && isLocalhost) {
-    return 'http://127.0.0.1:3011/api/analytics';
-  }
-
-  return null;
-}
-
-const ANALYTICS_API_URL = resolveAnalyticsApiUrl();
+const ANALYTICS_API_URL = resolveAnalyticsApiUrl({
+  configuredUrl: process.env.BROWSERBUD_LOCAL_API_URL,
+  windowOrigin: typeof window === 'undefined' ? '' : window.location.origin,
+  windowHostname: typeof window === 'undefined' ? '' : window.location.hostname,
+});
 
 async function request<TResponse>(pathname: string, init?: RequestInit): Promise<TResponse | null> {
-  if (!ANALYTICS_API_URL) {
-    return null;
-  }
-
   try {
     const response = await fetch(`${ANALYTICS_API_URL}${pathname}`, {
       ...init,
