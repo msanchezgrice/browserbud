@@ -18,14 +18,14 @@ test('resolveAnalyticsApiUrl prefers an explicit configured URL', () => {
   );
 });
 
-test('resolveAnalyticsApiUrl uses same-origin analytics routes in production', () => {
+test('resolveAnalyticsApiUrl disables shared analytics routes in production by default', () => {
   assert.equal(
     resolveAnalyticsApiUrl({
       configuredUrl: '',
       windowOrigin: 'https://browserbud.com',
       windowHostname: 'browserbud.com',
     }),
-    'https://browserbud.com/api/analytics',
+    null,
   );
 });
 

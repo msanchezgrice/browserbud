@@ -17,6 +17,10 @@ const ANALYTICS_API_URL = resolveAnalyticsApiUrl({
 });
 
 async function request<TResponse>(pathname: string, init?: RequestInit): Promise<TResponse | null> {
+  if (!ANALYTICS_API_URL) {
+    return null;
+  }
+
   try {
     const response = await fetch(`${ANALYTICS_API_URL}${pathname}`, {
       ...init,

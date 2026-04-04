@@ -184,7 +184,7 @@ function getHistoryUnavailableMessage(hasStoredFallback: boolean): string {
     return 'History backend unavailable. Start `npm run dev:api` for shared session history. Finished sessions will still save in this browser.';
   }
 
-  return 'History backend unavailable on this deploy right now. Finished sessions will still save in this browser.';
+  return 'Shared history is not enabled on this deploy yet. Finished sessions will still save in this browser.';
 }
 
 const TAB_METADATA: Record<AppTab, { label: string; toolName: string; description: string; emptyState: string; }> = {

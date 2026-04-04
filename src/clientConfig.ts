@@ -19,16 +19,15 @@ function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, '');
 }
 
-export function resolveAnalyticsApiUrl(input: ResolveAnalyticsApiUrlInput = {}): string {
+export function resolveAnalyticsApiUrl(input: ResolveAnalyticsApiUrlInput = {}): string | null {
   const configuredUrl = stripTrailingSlash(trimToValue(input.configuredUrl));
   if (configuredUrl) {
     return configuredUrl;
   }
 
-  const windowOrigin = stripTrailingSlash(trimToValue(input.windowOrigin));
   const windowHostname = trimToValue(input.windowHostname).toLowerCase();
-  if (windowOrigin && windowHostname && !LOCAL_HOSTNAMES.has(windowHostname)) {
-    return `${windowOrigin}/api/analytics`;
+  if (windowHostname && !LOCAL_HOSTNAMES.has(windowHostname)) {
+    return null;
   }
 
   return DEFAULT_LOCAL_ANALYTICS_API_URL;
