@@ -92,7 +92,7 @@ const FREQUENCIES = [
   { id: 60000, name: 'Every 1 minute' },
 ];
 
-type AppTab = 'transcript' | 'info' | 'activity' | 'notes' | 'history';
+type AppTab = 'transcript' | 'info' | 'activity' | 'notes' | 'history' | 'memory';
 
 type LogEntry = {
   id: string;
@@ -213,12 +213,38 @@ const TAB_METADATA: Record<AppTab, { label: string; toolName: string; descriptio
     emptyState: 'No notes saved yet. Say add a note or remember this to trigger saveNote.',
   },
   history: {
-    label: 'History & Analysis',
-    toolName: 'Browser Memory',
-    description: 'Session history, saved context, and recap analysis from the browser memory store.',
+    label: 'Session History',
+    toolName: 'Session timeline',
+    description: 'Browse finished sessions, raw events, saved context, and recent turns.',
     emptyState: 'No session history yet. Finish a session to populate this view.',
   },
+  memory: {
+    label: 'Browser Memory',
+    toolName: 'Reusable record',
+    description: 'Readable recap markdown plus the most useful saved context from your finished sessions.',
+    emptyState: 'No browser memory yet. Finish a session to generate a recap and saved context.',
+  },
 };
+
+const TAB_BUTTONS: Array<{
+  id: AppTab;
+  label: string;
+  Icon: React.ComponentType<{ className?: string }>;
+}> = [
+  { id: 'transcript', label: 'Live Transcript', Icon: MessageSquare },
+  { id: 'info', label: 'Helpful Info', Icon: BookOpen },
+  { id: 'activity', label: 'Activity Log', Icon: List },
+  { id: 'notes', label: 'Saved Notes', Icon: Bookmark },
+  { id: 'history', label: 'History', Icon: Clock },
+  { id: 'memory', label: 'Browser Memory', Icon: FileText },
+];
+
+const MARKDOWN_PROSE_CLASS =
+  'prose prose-stone prose-headings:text-stone-900 prose-p:text-stone-700 prose-strong:text-stone-900 prose-a:text-teal-600 prose-code:text-teal-700 prose-pre:bg-stone-950 prose-pre:text-stone-100 max-w-none';
+
+function stripSessionRecapHeading(markdown: string | null | undefined): string {
+  return (markdown || '').replace(/^# Session Recap\s*/i, '').trim();
+}
 
 function ListeningIndicator() {
   return (
@@ -280,6 +306,7 @@ export default function App() {
   
   // Custom Persona State
   const [showAddPersona, setShowAddPersona] = useState(false);
+  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [newPersonaName, setNewPersonaName] = useState('');
   const [newPersonaPrompt, setNewPersonaPrompt] = useState('');
@@ -299,9 +326,12 @@ export default function App() {
 
   const selectedPersonality = personas.find((option) => option.id === personality) || personas[0];
   const configuredApiKey = userApiKey.trim();
+  const historySurfaceOpen = activeTab === 'history' || activeTab === 'memory';
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const settingsPanelRef = useRef<HTMLDivElement>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
   
   // Live API & Audio Refs
   const sessionRef = useRef<Promise<any> | null>(null);
@@ -369,6 +399,39 @@ export default function App() {
   }, [userApiKey]);
 
   useEffect(() => {
+    if (!showSettingsPanel) {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) {
+        return;
+      }
+
+      if (settingsPanelRef.current?.contains(target) || settingsButtonRef.current?.contains(target)) {
+        return;
+      }
+
+      setShowSettingsPanel(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowSettingsPanel(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showSettingsPanel]);
+
+  useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.helpfulInfo, helpfulInfo);
   }, [helpfulInfo]);
 
@@ -425,20 +488,20 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (activeTab !== 'history') {
+    if (!historySurfaceOpen) {
       return;
     }
 
     void refreshHistorySessions();
-  }, [activeTab]);
+  }, [historySurfaceOpen]);
 
   useEffect(() => {
-    if (activeTab !== 'history' || !selectedHistorySessionId) {
+    if (!historySurfaceOpen || !selectedHistorySessionId) {
       return;
     }
 
     void refreshSelectedHistoryTimeline(selectedHistorySessionId);
-  }, [activeTab, selectedHistorySessionId]);
+  }, [historySurfaceOpen, selectedHistorySessionId]);
 
   const savePersonas = (newPersonas: Personality[]) => {
     setPersonas(newPersonas);
@@ -810,7 +873,7 @@ export default function App() {
       savedNotesBaseline: savedNotes,
     };
 
-    if (activeTab === 'history') {
+    if (historySurfaceOpen) {
       void refreshHistorySessions();
     }
   };
@@ -970,7 +1033,7 @@ export default function App() {
     if (skipRecap) {
       void completeAnalyticsSession(sessionId, endedAt);
       persistLocalSession(null);
-      if (activeTab === 'history') {
+      if (historySurfaceOpen) {
         void refreshHistorySessions();
       }
       return;
@@ -1015,7 +1078,7 @@ export default function App() {
       }, ...prev]);
     }
 
-    if (activeTab === 'history') {
+    if (historySurfaceOpen) {
       void refreshHistorySessions();
     }
   };
@@ -1895,12 +1958,15 @@ Tool rules:
     }];
   });
   const latestHistorySession = historySessions[0] || null;
+  const selectedHistorySummary = selectedHistorySession?.latestSummary
+    || selectedHistoryTimeline?.summaries.find((summary) => summary.summaryKind === 'session_recap')
+    || null;
   const latestHistorySummary = latestHistorySession?.latestSummary
     || selectedHistoryTimeline?.summaries.find((summary) => summary.summaryKind === 'session_recap')
     || null;
-  const latestHistorySummaryPreview = latestHistorySummary
-    ? latestHistorySummary.markdown.replace(/^# Session Recap\s*/i, '').trim()
-    : '';
+  const featuredMemorySession = selectedHistorySession || latestHistorySession;
+  const featuredMemorySummary = selectedHistorySummary || latestHistorySummary;
+  const featuredMemoryMarkdown = stripSessionRecapHeading(featuredMemorySummary?.markdown);
 
   if (!runtimeSupport.supported) {
     return (
@@ -1965,69 +2031,31 @@ Tool rules:
 
         {/* Left Panel: Configuration */}
         <div className="lg:col-span-4 flex flex-col gap-6 h-full overflow-y-auto pr-2 pb-8 custom-scrollbar">
-          <div className="space-y-3">
-            <div className="space-y-2">
-              <h1 className="text-xl font-semibold tracking-tight flex items-center gap-2.5">
+	          <div className="space-y-3">
+	            <div className="space-y-2">
+	              <h1 className="text-xl font-semibold tracking-tight flex items-center gap-2.5">
                 <Monitor className="w-6 h-6 text-teal-600" />
                 BrowserBud
               </h1>
               <p className="text-sm text-stone-500">
                 BYO Gemini key alpha for turning live browsing into recaps, saved context, and session history.
-              </p>
-            </div>
-            {errorMsg && (
-              <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700 shadow-sm">
-                {errorMsg}
-              </div>
-            )}
-          </div>
+	              </p>
+	            </div>
+	            {errorMsg && (
+	              <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700 shadow-sm">
+	                {errorMsg}
+	              </div>
+	            )}
+	            <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-600 shadow-sm">
+	              {configuredApiKey
+	                ? 'Gemini key is stored locally on this device. Use the settings button in the top-right to review or clear it.'
+	                : 'Add your Gemini key from the settings button in the top-right before starting the companion.'}
+	            </div>
+	          </div>
 
-          <div className="bg-white border border-[#E8E5E0] rounded-xl p-5 space-y-6 shadow-sm">
+	          <div className="bg-white border border-[#E8E5E0] rounded-xl p-5 space-y-6 shadow-sm">
 
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <label className="text-sm font-medium text-stone-700 flex items-center gap-2">
-                  <Settings className="w-4 h-4 text-stone-400" />
-                  Bring Your Own Gemini Key
-                </label>
-                <button
-                  onClick={() => setUserApiKey('')}
-                  className="text-xs text-stone-400 hover:text-stone-600 transition-colors"
-                >
-                  Clear
-                </button>
-              </div>
-
-              <div className="rounded-xl border border-stone-200 bg-stone-50 p-4 space-y-3">
-                <input
-                  type={showApiKey ? 'text' : 'password'}
-                  value={userApiKey}
-                  onChange={(event) => setUserApiKey(event.target.value)}
-                  placeholder="Paste your Gemini API key"
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2.5 text-sm text-stone-800 focus:outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500/20"
-                />
-                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-stone-500">
-                  <div>
-                    {configuredApiKey ? 'Stored locally in this browser.' : 'Required to start the companion.'}
-                  </div>
-                  <button
-                    onClick={() => setShowApiKey((current) => !current)}
-                    className="rounded-full border border-stone-200 bg-white px-3 py-1 font-medium text-stone-600 transition-colors hover:bg-stone-100"
-                  >
-                    {showApiKey ? 'Hide key' : 'Show key'}
-                  </button>
-                </div>
-              </div>
-
-              <p className="text-xs text-stone-500">
-                Alpha mode: BrowserBud uses your Gemini key directly from this device. Managed accounts and hosted billing come later.
-              </p>
-            </div>
-
-            {/* Screen Share Preview */}
+	            {/* Screen Share Preview */}
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <label className="text-sm font-medium text-stone-700 flex items-center gap-2">
@@ -2227,21 +2255,29 @@ Tool rules:
             </div>
 
             {/* Controls */}
-            <div className="pt-4 border-t border-stone-200 flex gap-3">
-              <button
-                onClick={toggleRunning}
-                disabled={!isSharing || !configuredApiKey}
-                className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-medium transition-all ${
-                  !isSharing || !configuredApiKey
-                    ? 'bg-stone-100 text-stone-400 cursor-not-allowed'
-                    : isRunning
-                      ? 'bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200'
-                      : 'bg-teal-600 text-white hover:bg-teal-700 shadow-md shadow-teal-600/15'
-                }`}
-              >
-                {isRunning ? <Square className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
-                {isRunning ? 'Stop Companion' : configuredApiKey ? 'Start Companion' : 'Add Key to Start'}
-              </button>
+	            <div className="pt-4 border-t border-stone-200 flex gap-3">
+	              <button
+	                onClick={() => {
+	                  if (!configuredApiKey) {
+	                    setShowSettingsPanel(true);
+	                    return;
+	                  }
+	                  toggleRunning();
+	                }}
+	                disabled={!isSharing}
+	                className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-medium transition-all ${
+	                  !isSharing
+	                    ? 'bg-stone-100 text-stone-400 cursor-not-allowed'
+	                    : !configuredApiKey
+	                      ? 'bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200'
+	                      : isRunning
+	                        ? 'bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200'
+	                        : 'bg-teal-600 text-white hover:bg-teal-700 shadow-md shadow-teal-600/15'
+	                }`}
+	              >
+	                {isRunning ? <Square className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
+	                {isRunning ? 'Stop Companion' : configuredApiKey ? 'Start Companion' : 'Open Settings for Key'}
+	              </button>
 
               <button
                 onClick={() => setIsMicMuted(!isMicMuted)}
@@ -2265,10 +2301,10 @@ Tool rules:
         <div className="lg:col-span-8 flex min-h-0 flex-col h-full bg-white border border-stone-200 rounded-xl overflow-hidden shadow-sm">
 
           {/* Tabs Header */}
-          <div className="px-4 pt-4 border-b border-stone-200 bg-white flex flex-col gap-4 z-10">
-            <div className="flex flex-col gap-3 px-2">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-4">
+	          <div className="px-4 pt-4 border-b border-stone-200 bg-white flex flex-col gap-4 z-10">
+	            <div className="flex flex-col gap-3 px-2">
+	              <div className="flex items-center justify-between gap-3">
+	                <div className="flex items-center gap-4">
                   <div className={`flex items-center gap-2 text-xs font-medium px-2.5 py-1 rounded-full border ${
                     isRunning ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-stone-100 text-stone-500 border-stone-200'
                   }`}>
@@ -2276,17 +2312,98 @@ Tool rules:
                     {isRunning ? 'LIVE' : 'OFFLINE'}
                   </div>
 
-                  <button
-                    onClick={() => sendSessionPrompt(TIMED_COMMENTARY_PROMPT)}
-                    disabled={!isRunning}
-                    className="text-xs bg-stone-100 hover:bg-stone-200 text-stone-600 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
-                  >
-                    Force Comment
-                  </button>
-                </div>
-              </div>
+	                  <button
+	                    onClick={() => sendSessionPrompt(TIMED_COMMENTARY_PROMPT)}
+	                    disabled={!isRunning}
+	                    className="text-xs bg-stone-100 hover:bg-stone-200 text-stone-600 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+	                  >
+	                    Force Comment
+	                  </button>
+	                </div>
 
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
+	                <div className="relative">
+	                  <button
+	                    ref={settingsButtonRef}
+	                    onClick={() => setShowSettingsPanel((current) => !current)}
+	                    className="inline-flex items-center gap-2 rounded-full border border-stone-200 bg-white px-3 py-2 text-xs font-medium text-stone-600 transition-colors hover:bg-stone-50"
+	                  >
+	                    <Settings className="h-4 w-4" />
+	                    <span>Settings</span>
+	                    <span className={`h-2 w-2 rounded-full ${configuredApiKey ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+	                  </button>
+
+	                  <AnimatePresence>
+	                    {showSettingsPanel && (
+	                      <motion.div
+	                        ref={settingsPanelRef}
+	                        initial={{ opacity: 0, y: -8, scale: 0.98 }}
+	                        animate={{ opacity: 1, y: 0, scale: 1 }}
+	                        exit={{ opacity: 0, y: -8, scale: 0.98 }}
+	                        transition={{ duration: 0.18, ease: 'easeOut' }}
+	                        className="absolute right-0 top-full z-20 mt-3 w-[min(28rem,calc(100vw-3rem))] rounded-[28px] border border-stone-200 bg-white p-5 shadow-xl shadow-stone-300/30"
+	                      >
+	                        <div className="flex items-start justify-between gap-4">
+	                          <div>
+	                            <div className="inline-flex items-center gap-2 rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-teal-700">
+	                              <Settings className="h-3.5 w-3.5" />
+	                              Settings
+	                            </div>
+	                            <h3 className="mt-3 text-lg font-semibold text-stone-900">Bring Your Own Gemini Key</h3>
+	                            <p className="mt-1 text-sm leading-6 text-stone-500">
+	                              Stored locally in this browser for alpha use. Managed accounts and hosted billing can come later.
+	                            </p>
+	                          </div>
+	                          <button
+	                            onClick={() => setShowSettingsPanel(false)}
+	                            className="text-xs font-medium text-stone-400 transition-colors hover:text-stone-600"
+	                          >
+	                            Close
+	                          </button>
+	                        </div>
+
+	                        <div className="mt-5 rounded-2xl border border-stone-200 bg-stone-50 p-4">
+	                          <div className="flex items-center justify-between gap-3">
+	                            <div className="text-xs font-medium uppercase tracking-[0.14em] text-stone-400">
+	                              Gemini API Key
+	                            </div>
+	                            <button
+	                              onClick={() => setUserApiKey('')}
+	                              className="text-xs text-stone-400 transition-colors hover:text-stone-600"
+	                            >
+	                              Clear
+	                            </button>
+	                          </div>
+
+	                          <input
+	                            type={showApiKey ? 'text' : 'password'}
+	                            value={userApiKey}
+	                            onChange={(event) => setUserApiKey(event.target.value)}
+	                            placeholder="Paste your Gemini API key"
+	                            autoCapitalize="off"
+	                            autoCorrect="off"
+	                            spellCheck={false}
+	                            className="mt-3 w-full rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-800 focus:outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500/20"
+	                          />
+
+	                          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-stone-500">
+	                            <div>
+	                              {configuredApiKey ? 'Stored locally on this device.' : 'Required before you can start the companion.'}
+	                            </div>
+	                            <button
+	                              onClick={() => setShowApiKey((current) => !current)}
+	                              className="rounded-full border border-stone-200 bg-white px-3 py-1 font-medium text-stone-600 transition-colors hover:bg-stone-100"
+	                            >
+	                              {showApiKey ? 'Hide key' : 'Show key'}
+	                            </button>
+	                          </div>
+	                        </div>
+	                      </motion.div>
+	                    )}
+	                  </AnimatePresence>
+	                </div>
+	              </div>
+
+	              <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
                 <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2">
                   <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Session Handle</div>
                   <div className="mt-1 text-sm font-medium text-stone-700 font-mono">{truncateSessionHandle(debugState.currentSessionHandle)}</div>
@@ -2306,107 +2423,31 @@ Tool rules:
                   <div className="text-xs text-stone-500">
                     {debugState.lastAutoSaveAt ? `Helpful save ${debugState.lastAutoSaveAt}` : 'No helpful auto saves yet'}
                   </div>
-                  <div className="text-xs text-stone-500">
-                    {debugState.lastCommentaryAt ? `Commentary ${debugState.lastCommentaryAt}` : 'No timed commentary yet'}
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-teal-200 bg-teal-50/80 px-4 py-4">
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                  <div className="max-w-2xl">
-                    <div className="text-[11px] uppercase tracking-[0.16em] text-teal-700">Browser Memory</div>
-                    <h3 className="mt-1 text-lg font-semibold text-stone-900">Make the recap the product</h3>
-                    <p className="mt-2 text-sm leading-6 text-stone-600">
-                      BrowserBud should leave you with a reusable record: saved notes, structured activity, and a session recap you can reopen later.
-                    </p>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 text-xs text-stone-600">
-                    <div className="rounded-xl border border-teal-200 bg-white px-3 py-2">
-                      <div className="uppercase tracking-[0.14em] text-stone-400">Sessions</div>
-                      <div className="mt-1 text-sm font-semibold text-stone-900">{historySessions.length}</div>
-                    </div>
-                    <div className="rounded-xl border border-teal-200 bg-white px-3 py-2">
-                      <div className="uppercase tracking-[0.14em] text-stone-400">Saved Items</div>
-                      <div className="mt-1 text-sm font-semibold text-stone-900">{selectedHistoryTimeline?.memories.length ?? 0}</div>
-                    </div>
-                    <div className="rounded-xl border border-teal-200 bg-white px-3 py-2">
-                      <div className="uppercase tracking-[0.14em] text-stone-400">Turns</div>
-                      <div className="mt-1 text-sm font-semibold text-stone-900">{selectedHistoryTimeline?.turns.length ?? logs.length}</div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={() => setActiveTab('history')}
-                    className="rounded-full bg-teal-600 px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-white transition-colors hover:bg-teal-700"
-                  >
-                    Open History
-                  </button>
-                  <div className="rounded-full border border-teal-200 bg-white px-3 py-2 text-xs text-stone-500">
-                    {latestHistorySummary ? 'Latest recap ready' : 'Your next finished session will generate a recap'}
-                  </div>
-                </div>
-
-                {latestHistorySummaryPreview && (
-                  <div className="mt-4 rounded-xl border border-teal-200 bg-white px-4 py-3">
-                    <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Latest recap preview</div>
-                    <p className="mt-2 text-sm leading-6 text-stone-700">
-                      {latestHistorySummaryPreview}
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="flex gap-1 overflow-x-auto custom-scrollbar pb-2">
-              <button
-                onClick={() => setActiveTab('transcript')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
-                  activeTab === 'transcript' ? 'bg-stone-100 text-stone-900 font-medium' : 'text-stone-500 hover:text-stone-700 hover:bg-stone-50'
-                }`}
-              >
-                <MessageSquare className="w-4 h-4" />
-                Live Transcript
-              </button>
-              <button
-                onClick={() => setActiveTab('info')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
-                  activeTab === 'info' ? 'bg-teal-50 text-teal-700 font-medium' : 'text-stone-500 hover:text-stone-700 hover:bg-stone-50'
-                }`}
-              >
-                <BookOpen className="w-4 h-4" />
-                Helpful Info
-              </button>
-              <button
-                onClick={() => setActiveTab('activity')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
-                  activeTab === 'activity' ? 'bg-teal-50 text-teal-700 font-medium' : 'text-stone-500 hover:text-stone-700 hover:bg-stone-50'
-                }`}
-              >
-                <List className="w-4 h-4" />
-                Activity Log
-              </button>
-              <button
-                onClick={() => setActiveTab('notes')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
-                  activeTab === 'notes' ? 'bg-teal-50 text-teal-700 font-medium' : 'text-stone-500 hover:text-stone-700 hover:bg-stone-50'
-                }`}
-              >
-                <Bookmark className="w-4 h-4" />
-                Saved Notes
-              </button>
-              <button
-                onClick={() => setActiveTab('history')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
-                  activeTab === 'history' ? 'bg-teal-50 text-teal-700 font-medium' : 'text-stone-500 hover:text-stone-700 hover:bg-stone-50'
-                }`}
-              >
-                <FileText className="w-4 h-4" />
-                History & Analysis
-              </button>
-            </div>
-          </div>
+	                  <div className="text-xs text-stone-500">
+	                    {debugState.lastCommentaryAt ? `Commentary ${debugState.lastCommentaryAt}` : 'No timed commentary yet'}
+	                  </div>
+	                </div>
+	              </div>
+	            </div>
+	            <div className="flex gap-1 overflow-x-auto custom-scrollbar pb-2">
+	              {TAB_BUTTONS.map(({ id, label, Icon }) => (
+	                <button
+	                  key={id}
+	                  onClick={() => setActiveTab(id)}
+	                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
+	                    activeTab === id
+	                      ? id === 'transcript'
+	                        ? 'bg-stone-100 text-stone-900 font-medium'
+	                        : 'bg-teal-50 text-teal-700 font-medium'
+	                      : 'text-stone-500 hover:text-stone-700 hover:bg-stone-50'
+	                  }`}
+	                >
+	                  <Icon className="w-4 h-4" />
+	                  {label}
+	                </button>
+	              ))}
+	            </div>
+	          </div>
 
           {/* Tab Content */}
           <div className="flex-1 min-h-0 overflow-y-auto p-6 relative custom-scrollbar">
@@ -2508,13 +2549,13 @@ Tool rules:
             )}
 
             {/* Helpful Info Tab */}
-            {activeTab === 'info' && (
-              <div className="min-h-full">
-                {helpfulInfo ? (
-                  <div className="prose prose-stone prose-teal max-w-none">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{helpfulInfo}</ReactMarkdown>
-                  </div>
-                ) : (
+	            {activeTab === 'info' && (
+	              <div className="min-h-full">
+	                {helpfulInfo ? (
+	                  <div className={MARKDOWN_PROSE_CLASS}>
+	                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{helpfulInfo}</ReactMarkdown>
+	                  </div>
+	                ) : (
                   <div className="flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
                     <BookOpen className="w-12 h-12 opacity-15" />
                     <p>{TAB_METADATA.info.emptyState}</p>
@@ -2524,13 +2565,13 @@ Tool rules:
             )}
 
             {/* Activity Log Tab */}
-            {activeTab === 'activity' && (
-              <div className="min-h-full">
-                {activityLog ? (
-                  <div className="prose prose-stone prose-teal max-w-none">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{activityLog}</ReactMarkdown>
-                  </div>
-                ) : (
+	            {activeTab === 'activity' && (
+	              <div className="min-h-full">
+	                {activityLog ? (
+	                  <div className={MARKDOWN_PROSE_CLASS}>
+	                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{activityLog}</ReactMarkdown>
+	                  </div>
+	                ) : (
                   <div className="flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
                     <List className="w-12 h-12 opacity-15" />
                     <p>{TAB_METADATA.activity.emptyState}</p>
@@ -2540,13 +2581,13 @@ Tool rules:
             )}
 
             {/* Saved Notes Tab */}
-            {activeTab === 'notes' && (
-              <div className="min-h-full">
-                {savedNotes ? (
-                  <div className="prose prose-stone prose-teal max-w-none">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{savedNotes}</ReactMarkdown>
-                  </div>
-                ) : (
+	            {activeTab === 'notes' && (
+	              <div className="min-h-full">
+	                {savedNotes ? (
+	                  <div className={MARKDOWN_PROSE_CLASS}>
+	                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{savedNotes}</ReactMarkdown>
+	                  </div>
+	                ) : (
                   <div className="flex flex-col items-center justify-center text-stone-400 gap-4 h-full">
                     <Bookmark className="w-12 h-12 opacity-15" />
                     <p>{TAB_METADATA.notes.emptyState}</p>
@@ -2659,14 +2700,14 @@ Tool rules:
                             </div>
                           </div>
 
-                          <div className="rounded-2xl border border-stone-200 bg-white p-5">
-                            <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Analysis</div>
-                            <h3 className="mt-1 text-lg font-semibold text-stone-900">Session recap</h3>
-                            {selectedHistorySession.latestSummary ? (
-                              <div className="prose prose-stone prose-teal mt-4 max-w-none">
-                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedHistorySession.latestSummary.markdown}</ReactMarkdown>
-                              </div>
-                            ) : (
+	                          <div className="rounded-2xl border border-stone-200 bg-white p-5">
+	                            <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Analysis</div>
+	                            <h3 className="mt-1 text-lg font-semibold text-stone-900">Session recap</h3>
+	                            {selectedHistorySummary ? (
+	                              <div className={`${MARKDOWN_PROSE_CLASS} mt-4`}>
+	                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedHistorySummary.markdown}</ReactMarkdown>
+	                              </div>
+	                            ) : (
                               <p className="mt-4 text-sm text-stone-500">
                                 No recap has been generated for this session yet. Stop the session or refresh after the recap finishes.
                               </p>
@@ -2677,15 +2718,17 @@ Tool rules:
                             <div className="rounded-2xl border border-stone-200 bg-white p-5">
                               <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Saved Context</div>
                               <h3 className="mt-1 text-lg font-semibold text-stone-900">Memories and notes</h3>
-                              <div className="mt-4 space-y-3">
-                                {historyMemories.length > 0 ? historyMemories.map((memory) => (
-                                  <div key={memory.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
-                                    <div className="text-sm font-medium text-stone-900">{memory.title}</div>
-                                    <div className="mt-1 text-xs uppercase tracking-[0.12em] text-teal-600">{memory.memoryType}</div>
-                                    <div className="mt-2 text-sm text-stone-600 whitespace-pre-wrap">{memory.bodyMd}</div>
-                                  </div>
-                                )) : (
-                                  <p className="text-sm text-stone-500">No saved context for this session yet.</p>
+	                              <div className="mt-4 space-y-3">
+	                                {historyMemories.length > 0 ? historyMemories.map((memory) => (
+	                                  <div key={memory.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+	                                    <div className="text-sm font-medium text-stone-900">{memory.title}</div>
+	                                    <div className="mt-1 text-xs uppercase tracking-[0.12em] text-teal-600">{memory.memoryType}</div>
+	                                    <div className={`${MARKDOWN_PROSE_CLASS} mt-3 text-sm`}>
+	                                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{memory.bodyMd}</ReactMarkdown>
+	                                    </div>
+	                                  </div>
+	                                )) : (
+	                                  <p className="text-sm text-stone-500">No saved context for this session yet.</p>
                                 )}
                               </div>
                             </div>
@@ -2733,12 +2776,125 @@ Tool rules:
                       )}
                     </div>
                   </div>
-                )}
-              </div>
-            )}
+	                )}
+	              </div>
+	            )}
 
-          </div>
-        </div>
+	            {activeTab === 'memory' && (
+	              <div className="min-h-full space-y-6">
+	                {historyError && (
+	                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+	                    {historyError}
+	                  </div>
+	                )}
+
+	                <div className="rounded-2xl border border-teal-200 bg-teal-50/80 px-5 py-5">
+	                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+	                    <div className="max-w-2xl">
+	                      <div className="text-[11px] uppercase tracking-[0.16em] text-teal-700">Browser Memory</div>
+	                      <h3 className="mt-1 text-lg font-semibold text-stone-900">Make the recap the product</h3>
+	                      <p className="mt-2 text-sm leading-6 text-stone-600">
+	                        BrowserBud should leave you with a reusable record: readable recap markdown, saved notes, structured activity, and context you can reopen later.
+	                      </p>
+	                    </div>
+	                    <div className="grid grid-cols-3 gap-2 text-xs text-stone-600">
+	                      <div className="rounded-xl border border-teal-200 bg-white px-3 py-2">
+	                        <div className="uppercase tracking-[0.14em] text-stone-400">Sessions</div>
+	                        <div className="mt-1 text-sm font-semibold text-stone-900">{historySessions.length}</div>
+	                      </div>
+	                      <div className="rounded-xl border border-teal-200 bg-white px-3 py-2">
+	                        <div className="uppercase tracking-[0.14em] text-stone-400">Saved Items</div>
+	                        <div className="mt-1 text-sm font-semibold text-stone-900">{selectedHistoryTimeline?.memories.length ?? 0}</div>
+	                      </div>
+	                      <div className="rounded-xl border border-teal-200 bg-white px-3 py-2">
+	                        <div className="uppercase tracking-[0.14em] text-stone-400">Turns</div>
+	                        <div className="mt-1 text-sm font-semibold text-stone-900">{selectedHistoryTimeline?.turns.length ?? logs.length}</div>
+	                      </div>
+	                    </div>
+	                  </div>
+
+	                  <div className="mt-4 flex flex-wrap items-center gap-2">
+	                    <button
+	                      onClick={() => setActiveTab('history')}
+	                      className="rounded-full bg-teal-600 px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-white transition-colors hover:bg-teal-700"
+	                    >
+	                      Open History
+	                    </button>
+	                    <button
+	                      onClick={() => void refreshHistorySessions()}
+	                      className="rounded-full border border-teal-200 bg-white px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-teal-700 transition-colors hover:bg-teal-100"
+	                    >
+	                      Refresh Memory
+	                    </button>
+	                    <div className="rounded-full border border-teal-200 bg-white px-3 py-2 text-xs text-stone-500">
+	                      {featuredMemorySummary ? 'Latest recap ready' : 'Your next finished session will generate a recap'}
+	                    </div>
+	                  </div>
+	                </div>
+
+	                {featuredMemorySummary ? (
+	                  <div className="grid gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+	                    <div className="rounded-2xl border border-stone-200 bg-white p-5">
+	                      <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Recap</div>
+	                      <h3 className="mt-1 text-lg font-semibold text-stone-900">
+	                        {featuredMemorySession
+	                          ? `Session recap for ${new Date(featuredMemorySession.session.startedAt).toLocaleString()}`
+	                          : 'Latest recap'}
+	                      </h3>
+	                      <div className={`${MARKDOWN_PROSE_CLASS} mt-4`}>
+	                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{featuredMemoryMarkdown}</ReactMarkdown>
+	                      </div>
+	                    </div>
+
+	                    <div className="space-y-5">
+	                      <div className="rounded-2xl border border-stone-200 bg-white p-5">
+	                        <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Saved context</div>
+	                        <h3 className="mt-1 text-lg font-semibold text-stone-900">Memory cards</h3>
+	                        <div className="mt-4 space-y-3">
+	                          {historyMemories.length > 0 ? historyMemories.slice(0, 4).map((memory) => (
+	                            <div key={memory.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+	                              <div className="text-sm font-medium text-stone-900">{memory.title}</div>
+	                              <div className="mt-1 text-xs uppercase tracking-[0.12em] text-teal-600">{memory.memoryType}</div>
+	                              <div className={`${MARKDOWN_PROSE_CLASS} mt-3 text-sm`}>
+	                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{memory.bodyMd}</ReactMarkdown>
+	                              </div>
+	                            </div>
+	                          )) : (
+	                            <p className="text-sm text-stone-500">No saved context for this session yet.</p>
+	                          )}
+	                        </div>
+	                      </div>
+
+	                      <div className="rounded-2xl border border-stone-200 bg-white p-5">
+	                        <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Recent conversation</div>
+	                        <h3 className="mt-1 text-lg font-semibold text-stone-900">Latest turns</h3>
+	                        <div className="mt-4 space-y-3">
+	                          {historyTurns.length > 0 ? historyTurns.slice(0, 3).map((turn) => (
+	                            <div key={turn.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+	                              <div className="flex items-center justify-between gap-3 text-xs text-stone-400">
+	                                <span className="font-medium uppercase tracking-[0.12em] text-teal-600">{turn.role}</span>
+	                                <span>{new Date(turn.startedAt).toLocaleTimeString()}</span>
+	                              </div>
+	                              <div className="mt-2 text-sm leading-6 text-stone-700">{turn.transcript}</div>
+	                            </div>
+	                          )) : (
+	                            <p className="text-sm text-stone-500">Select a finished session in History to inspect its recap and saved context here.</p>
+	                          )}
+	                        </div>
+	                      </div>
+	                    </div>
+	                  </div>
+	                ) : (
+	                  <div className="flex flex-col items-center justify-center gap-4 rounded-2xl border border-stone-200 bg-white px-6 py-16 text-center text-stone-400">
+	                    <FileText className="h-12 w-12 opacity-15" />
+	                    <p>{TAB_METADATA.memory.emptyState}</p>
+	                  </div>
+	                )}
+	              </div>
+	            )}
+
+	          </div>
+	        </div>
 
       </div>
     </div>
