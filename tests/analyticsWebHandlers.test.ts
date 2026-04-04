@@ -10,6 +10,7 @@ import {
   handleAnalyticsSessionsRequest,
   handleLatestAnalyticsSessionTimelineRequest,
 } from '../server/analyticsWebHandlers';
+import { UnavailableAnalyticsStore } from '../server/unavailableAnalyticsStore';
 
 test('analytics web handlers support session creation, listing, latest timeline, and recap', async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), 'browserbud-analytics-web-'));
@@ -62,4 +63,15 @@ test('analytics web handlers support session creation, listing, latest timeline,
     store.close();
     await rm(tempDir, { recursive: true, force: true });
   }
+});
+
+test('analytics web handlers return 503 when shared analytics is not configured', async () => {
+  const response = await handleAnalyticsSessionsRequest(
+    new Request('https://browserbud.com/api/analytics/sessions?limit=5'),
+    new UnavailableAnalyticsStore('Shared analytics backend is not configured.'),
+  );
+
+  assert.equal(response.status, 503);
+  const payload = await response.json();
+  assert.match(payload.error, /not configured/i);
 });

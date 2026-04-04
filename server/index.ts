@@ -1,27 +1,38 @@
-import path from 'node:path';
-
-import { AnalyticsStore } from './analyticsStore';
 import { createAnalyticsApp } from './analyticsApp';
+import { closeAnalyticsStore, getAnalyticsStore, resolveAnalyticsRuntimeConfig } from './analyticsRuntime';
 
 const port = Number(process.env.BROWSERBUD_LOCAL_API_PORT || 3011);
-const dbPath = process.env.BROWSERBUD_LOCAL_DB_PATH || path.resolve(process.cwd(), 'data/browserbud.sqlite');
 
-const store = new AnalyticsStore({ dbPath });
-store.initialize();
+async function main() {
+  const runtimeConfig = resolveAnalyticsRuntimeConfig();
+  const store = await getAnalyticsStore();
+  const app = createAnalyticsApp({ store });
 
-const app = createAnalyticsApp({ store });
-
-const server = app.listen(port, '127.0.0.1', () => {
-  console.log(`Browserbud analytics API listening on http://127.0.0.1:${port}`);
-  console.log(`SQLite database: ${dbPath}`);
-});
-
-function shutdown() {
-  server.close(() => {
-    store.close();
-    process.exit(0);
+  const server = app.listen(port, '127.0.0.1', () => {
+    console.log(`Browserbud analytics API listening on http://127.0.0.1:${port}`);
+    if (runtimeConfig.kind === 'postgres') {
+      console.log('Analytics backend: Postgres');
+      return;
+    }
+    if (runtimeConfig.kind === 'sqlite') {
+      console.log(`SQLite database: ${runtimeConfig.dbPath}`);
+      return;
+    }
+    console.log(runtimeConfig.message);
   });
+
+  async function shutdown() {
+    server.close(async () => {
+      await closeAnalyticsStore();
+      process.exit(0);
+    });
+  }
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+void main().catch((error) => {
+  console.error('Failed to start Browserbud analytics API', error);
+  process.exit(1);
+});

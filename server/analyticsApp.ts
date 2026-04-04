@@ -6,10 +6,10 @@ import type {
   AnalyticsRawEventInput,
   AnalyticsSessionCreateInput,
 } from '../src/analyticsTypes';
-import { AnalyticsStore } from './analyticsStore';
+import { AnalyticsBackendUnavailableError, type AnalyticsStoreAdapter } from './analyticsBackend';
 
 type CreateAnalyticsAppOptions = {
-  store: AnalyticsStore;
+  store: AnalyticsStoreAdapter;
 };
 
 function requireString(value: unknown, name: string): string {
@@ -53,10 +53,10 @@ export function createAnalyticsApp(options: CreateAnalyticsAppOptions) {
     res.json({ ok: true });
   });
 
-  app.post('/api/analytics/sessions', (req, res, next) => {
+  app.post('/api/analytics/sessions', async (req, res, next) => {
     try {
       const body = req.body || {};
-      const session = options.store.createSession({
+      const session = await options.store.createSession({
         id: optionalString(body.id) || undefined,
         startedAt: requireString(body.startedAt, 'startedAt'),
         sourceSurface: optionalString(body.sourceSurface),
@@ -72,9 +72,9 @@ export function createAnalyticsApp(options: CreateAnalyticsAppOptions) {
     }
   });
 
-  app.patch('/api/analytics/sessions/:sessionId', (req, res, next) => {
+  app.patch('/api/analytics/sessions/:sessionId', async (req, res, next) => {
     try {
-      const session = options.store.completeSession(
+      const session = await options.store.completeSession(
         requireString(req.params.sessionId, 'sessionId'),
         requireString(req.body?.endedAt, 'endedAt'),
       );
@@ -84,10 +84,10 @@ export function createAnalyticsApp(options: CreateAnalyticsAppOptions) {
     }
   });
 
-  app.post('/api/analytics/events', (req, res, next) => {
+  app.post('/api/analytics/events', async (req, res, next) => {
     try {
       const body = req.body || {};
-      const event = options.store.appendRawEvent({
+      const event = await options.store.appendRawEvent({
         id: optionalString(body.id) || undefined,
         sessionId: requireString(body.sessionId, 'sessionId'),
         seq: Number(body.seq),
@@ -111,10 +111,10 @@ export function createAnalyticsApp(options: CreateAnalyticsAppOptions) {
     }
   });
 
-  app.post('/api/analytics/turns', (req, res, next) => {
+  app.post('/api/analytics/turns', async (req, res, next) => {
     try {
       const body = req.body || {};
-      const turn = options.store.saveConversationTurn({
+      const turn = await options.store.saveConversationTurn({
         id: optionalString(body.id) || undefined,
         sessionId: requireString(body.sessionId, 'sessionId'),
         role: requireString(body.role, 'role'),
@@ -132,10 +132,10 @@ export function createAnalyticsApp(options: CreateAnalyticsAppOptions) {
     }
   });
 
-  app.post('/api/analytics/memories', (req, res, next) => {
+  app.post('/api/analytics/memories', async (req, res, next) => {
     try {
       const body = req.body || {};
-      const memory = options.store.saveMemory({
+      const memory = await options.store.saveMemory({
         id: optionalString(body.id) || undefined,
         sessionId: requireString(body.sessionId, 'sessionId'),
         memoryType: requireString(body.memoryType, 'memoryType'),
@@ -154,43 +154,43 @@ export function createAnalyticsApp(options: CreateAnalyticsAppOptions) {
     }
   });
 
-  app.get('/api/analytics/sessions', (req, res, next) => {
+  app.get('/api/analytics/sessions', async (req, res, next) => {
     try {
       const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : 10;
       const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 50) : 10;
-      const sessions = options.store.listRecentSessions(limit);
+      const sessions = await options.store.listRecentSessions(limit);
       res.json({ sessions });
     } catch (error) {
       next(error);
     }
   });
 
-  app.get('/api/analytics/sessions/latest/timeline', (_req, res, next) => {
+  app.get('/api/analytics/sessions/latest/timeline', async (_req, res, next) => {
     try {
-      const timeline = options.store.getLatestSessionTimeline();
+      const timeline = await options.store.getLatestSessionTimeline();
       res.json(timeline);
     } catch (error) {
       next(error);
     }
   });
 
-  app.get('/api/analytics/sessions/:sessionId/timeline', (req, res, next) => {
+  app.get('/api/analytics/sessions/:sessionId/timeline', async (req, res, next) => {
     try {
-      const timeline = options.store.listSessionTimeline(requireString(req.params.sessionId, 'sessionId'));
+      const timeline = await options.store.listSessionTimeline(requireString(req.params.sessionId, 'sessionId'));
       res.json(timeline);
     } catch (error) {
       next(error);
     }
   });
 
-  app.post('/api/analytics/sessions/:sessionId/recap', (req, res, next) => {
+  app.post('/api/analytics/sessions/:sessionId/recap', async (req, res, next) => {
     try {
       const sessionId = requireString(req.params.sessionId, 'sessionId');
       const endedAt = optionalString(req.body?.endedAt);
       if (endedAt) {
-        options.store.completeSession(sessionId, endedAt);
+        await options.store.completeSession(sessionId, endedAt);
       }
-      const summary = options.store.generateSessionRecap(sessionId);
+      const summary = await options.store.generateSessionRecap(sessionId);
       res.json({ summary });
     } catch (error) {
       next(error);
@@ -199,7 +199,8 @@ export function createAnalyticsApp(options: CreateAnalyticsAppOptions) {
 
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const message = error instanceof Error ? error.message : 'Unexpected analytics API error.';
-    res.status(400).json({ error: message });
+    const status = error instanceof AnalyticsBackendUnavailableError ? error.status : 400;
+    res.status(status).json({ error: message });
   });
 
   return app;

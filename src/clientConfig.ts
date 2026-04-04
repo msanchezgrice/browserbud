@@ -25,9 +25,10 @@ export function resolveAnalyticsApiUrl(input: ResolveAnalyticsApiUrlInput = {}):
     return configuredUrl;
   }
 
+  const windowOrigin = stripTrailingSlash(trimToValue(input.windowOrigin));
   const windowHostname = trimToValue(input.windowHostname).toLowerCase();
-  if (windowHostname && !LOCAL_HOSTNAMES.has(windowHostname)) {
-    return null;
+  if (windowOrigin && windowHostname && !LOCAL_HOSTNAMES.has(windowHostname)) {
+    return `${windowOrigin}/api/analytics`;
   }
 
   return DEFAULT_LOCAL_ANALYTICS_API_URL;

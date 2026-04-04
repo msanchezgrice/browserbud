@@ -4,7 +4,7 @@ import type {
   AnalyticsRawEventInput,
   AnalyticsSessionCreateInput,
 } from '../src/analyticsTypes';
-import { AnalyticsStore } from './analyticsStore';
+import { AnalyticsBackendUnavailableError, type AnalyticsStoreAdapter } from './analyticsBackend';
 import { getAnalyticsStore } from './analyticsRuntime';
 
 function corsHeaders(extraHeaders: Record<string, string> = {}): HeadersInit {
@@ -35,8 +35,8 @@ function methodNotAllowed(allowedMethods: string[]): Response {
   return jsonResponse({ error: `Method not allowed. Use ${allowedMethods.join(', ')}.` }, 405);
 }
 
-function getStore(store?: AnalyticsStore): AnalyticsStore {
-  return store || getAnalyticsStore();
+async function getStore(store?: AnalyticsStoreAdapter): Promise<AnalyticsStoreAdapter> {
+  return store || await getAnalyticsStore();
 }
 
 async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
@@ -96,27 +96,28 @@ async function runHandler(handler: () => Promise<Response> | Response): Promise<
     return await handler();
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unexpected analytics API error.';
-    return jsonResponse({ error: message }, 400);
+    const status = error instanceof AnalyticsBackendUnavailableError ? error.status : 400;
+    return jsonResponse({ error: message }, status);
   }
 }
 
-export async function handleAnalyticsSessionsRequest(request: Request, store?: AnalyticsStore): Promise<Response> {
+export async function handleAnalyticsSessionsRequest(request: Request, store?: AnalyticsStoreAdapter): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return emptyResponse();
   }
 
   return runHandler(async () => {
-    const analyticsStore = getStore(store);
+    const analyticsStore = await getStore(store);
     if (request.method === 'GET') {
       const { searchParams } = new URL(request.url);
       const rawLimit = Number(searchParams.get('limit') || 10);
       const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 50) : 10;
-      return jsonResponse({ sessions: analyticsStore.listRecentSessions(limit) });
+      return jsonResponse({ sessions: await analyticsStore.listRecentSessions(limit) });
     }
 
     if (request.method === 'POST') {
       const body = await readJsonBody(request);
-      const session = analyticsStore.createSession({
+      const session = await analyticsStore.createSession({
         id: optionalString(body.id) || undefined,
         startedAt: requireString(body.startedAt, 'startedAt'),
         sourceSurface: optionalString(body.sourceSurface),
@@ -133,7 +134,7 @@ export async function handleAnalyticsSessionsRequest(request: Request, store?: A
   });
 }
 
-export async function handleAnalyticsSessionRequest(request: Request, store?: AnalyticsStore): Promise<Response> {
+export async function handleAnalyticsSessionRequest(request: Request, store?: AnalyticsStoreAdapter): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return emptyResponse();
   }
@@ -143,9 +144,9 @@ export async function handleAnalyticsSessionRequest(request: Request, store?: An
       return methodNotAllowed(['PATCH']);
     }
 
-    const analyticsStore = getStore(store);
+    const analyticsStore = await getStore(store);
     const body = await readJsonBody(request);
-    const session = analyticsStore.completeSession(
+    const session = await analyticsStore.completeSession(
       getSessionIdFromRequest(request),
       requireString(body.endedAt, 'endedAt'),
     );
@@ -154,7 +155,7 @@ export async function handleAnalyticsSessionRequest(request: Request, store?: An
   });
 }
 
-export async function handleAnalyticsEventsRequest(request: Request, store?: AnalyticsStore): Promise<Response> {
+export async function handleAnalyticsEventsRequest(request: Request, store?: AnalyticsStoreAdapter): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return emptyResponse();
   }
@@ -164,9 +165,9 @@ export async function handleAnalyticsEventsRequest(request: Request, store?: Ana
       return methodNotAllowed(['POST']);
     }
 
-    const analyticsStore = getStore(store);
+    const analyticsStore = await getStore(store);
     const body = await readJsonBody(request);
-    const event = analyticsStore.appendRawEvent({
+    const event = await analyticsStore.appendRawEvent({
       id: optionalString(body.id) || undefined,
       sessionId: requireString(body.sessionId, 'sessionId'),
       seq: Number(body.seq),
@@ -188,7 +189,7 @@ export async function handleAnalyticsEventsRequest(request: Request, store?: Ana
   });
 }
 
-export async function handleAnalyticsTurnsRequest(request: Request, store?: AnalyticsStore): Promise<Response> {
+export async function handleAnalyticsTurnsRequest(request: Request, store?: AnalyticsStoreAdapter): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return emptyResponse();
   }
@@ -198,9 +199,9 @@ export async function handleAnalyticsTurnsRequest(request: Request, store?: Anal
       return methodNotAllowed(['POST']);
     }
 
-    const analyticsStore = getStore(store);
+    const analyticsStore = await getStore(store);
     const body = await readJsonBody(request);
-    const turn = analyticsStore.saveConversationTurn({
+    const turn = await analyticsStore.saveConversationTurn({
       id: optionalString(body.id) || undefined,
       sessionId: requireString(body.sessionId, 'sessionId'),
       role: requireString(body.role, 'role'),
@@ -216,7 +217,7 @@ export async function handleAnalyticsTurnsRequest(request: Request, store?: Anal
   });
 }
 
-export async function handleAnalyticsMemoriesRequest(request: Request, store?: AnalyticsStore): Promise<Response> {
+export async function handleAnalyticsMemoriesRequest(request: Request, store?: AnalyticsStoreAdapter): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return emptyResponse();
   }
@@ -226,9 +227,9 @@ export async function handleAnalyticsMemoriesRequest(request: Request, store?: A
       return methodNotAllowed(['POST']);
     }
 
-    const analyticsStore = getStore(store);
+    const analyticsStore = await getStore(store);
     const body = await readJsonBody(request);
-    const memory = analyticsStore.saveMemory({
+    const memory = await analyticsStore.saveMemory({
       id: optionalString(body.id) || undefined,
       sessionId: requireString(body.sessionId, 'sessionId'),
       memoryType: requireString(body.memoryType, 'memoryType'),
@@ -245,7 +246,7 @@ export async function handleAnalyticsMemoriesRequest(request: Request, store?: A
   });
 }
 
-export async function handleLatestAnalyticsSessionTimelineRequest(request: Request, store?: AnalyticsStore): Promise<Response> {
+export async function handleLatestAnalyticsSessionTimelineRequest(request: Request, store?: AnalyticsStoreAdapter): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return emptyResponse();
   }
@@ -255,11 +256,11 @@ export async function handleLatestAnalyticsSessionTimelineRequest(request: Reque
       return methodNotAllowed(['GET']);
     }
 
-    return jsonResponse(getStore(store).getLatestSessionTimeline());
+    return jsonResponse(await (await getStore(store)).getLatestSessionTimeline());
   });
 }
 
-export async function handleAnalyticsSessionTimelineRequest(request: Request, store?: AnalyticsStore): Promise<Response> {
+export async function handleAnalyticsSessionTimelineRequest(request: Request, store?: AnalyticsStoreAdapter): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return emptyResponse();
   }
@@ -269,11 +270,11 @@ export async function handleAnalyticsSessionTimelineRequest(request: Request, st
       return methodNotAllowed(['GET']);
     }
 
-    return jsonResponse(getStore(store).listSessionTimeline(getSessionIdFromRequest(request)));
+    return jsonResponse(await (await getStore(store)).listSessionTimeline(getSessionIdFromRequest(request)));
   });
 }
 
-export async function handleAnalyticsSessionRecapRequest(request: Request, store?: AnalyticsStore): Promise<Response> {
+export async function handleAnalyticsSessionRecapRequest(request: Request, store?: AnalyticsStoreAdapter): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return emptyResponse();
   }
@@ -283,14 +284,14 @@ export async function handleAnalyticsSessionRecapRequest(request: Request, store
       return methodNotAllowed(['POST']);
     }
 
-    const analyticsStore = getStore(store);
+    const analyticsStore = await getStore(store);
     const sessionId = getSessionIdFromRequest(request);
     const body = await readJsonBody(request);
     const endedAt = optionalString(body.endedAt);
     if (endedAt) {
-      analyticsStore.completeSession(sessionId, endedAt);
+      await analyticsStore.completeSession(sessionId, endedAt);
     }
 
-    return jsonResponse({ summary: analyticsStore.generateSessionRecap(sessionId) });
+    return jsonResponse({ summary: await analyticsStore.generateSessionRecap(sessionId) });
   });
 }

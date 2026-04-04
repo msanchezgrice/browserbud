@@ -31,5 +31,5 @@ Browserbud now supports a local-first analytics companion backed by SQLite.
    `npm run dev`
 
 By default the UI posts analytics events to `http://127.0.0.1:3011/api/analytics` when BrowserBud is running locally.
-In production, BrowserBud defaults to browser-local history unless you explicitly configure a shared analytics endpoint.
-Set `BROWSERBUD_LOCAL_API_URL` if you want a different analytics endpoint in either environment.
+In production, the app uses same-origin `/api/analytics` routes and falls back to browser-local history if the shared backend is unavailable.
+Set `BROWSERBUD_DATABASE_URL`, `POSTGRES_URL`, or `DATABASE_URL` to back those routes with Postgres. `BROWSERBUD_LOCAL_API_URL` still overrides the client endpoint in either environment.

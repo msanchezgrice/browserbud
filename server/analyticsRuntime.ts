@@ -1,35 +1,96 @@
 import path from 'node:path';
 
-import { AnalyticsStore } from './analyticsStore';
+import type { AnalyticsStoreAdapter } from './analyticsBackend';
+import { PostgresAnalyticsStore } from './postgresAnalyticsStore';
+import { UnavailableAnalyticsStore } from './unavailableAnalyticsStore';
 
-let singletonStore: AnalyticsStore | null = null;
-let singletonDbPath: string | null = null;
+let singletonStore: AnalyticsStoreAdapter | null = null;
+let singletonStoreKey: string | null = null;
 
-function resolveAnalyticsDbPath(): string {
-  const configuredPath = process.env.BROWSERBUD_LOCAL_DB_PATH || process.env.BROWSERBUD_DB_PATH;
-  if (configuredPath) {
-    return configuredPath;
+type AnalyticsRuntimeConfig =
+  | { kind: 'postgres'; key: string; connectionString: string }
+  | { kind: 'sqlite'; key: string; dbPath: string }
+  | { kind: 'unavailable'; key: string; message: string };
+
+function trimToValue(value?: string | null): string {
+  return (value || '').trim();
+}
+
+function resolveAnalyticsDatabaseUrl(): string | null {
+  return trimToValue(
+    process.env.BROWSERBUD_DATABASE_URL
+      || process.env.POSTGRES_URL
+      || process.env.DATABASE_URL,
+  ) || null;
+}
+
+function resolveLocalAnalyticsDbPath(): string {
+  return process.env.BROWSERBUD_LOCAL_DB_PATH
+    || path.resolve(process.cwd(), 'data/browserbud.sqlite');
+}
+
+export function resolveAnalyticsRuntimeConfig(): AnalyticsRuntimeConfig {
+  const databaseUrl = resolveAnalyticsDatabaseUrl();
+  if (databaseUrl) {
+    return {
+      kind: 'postgres',
+      key: `postgres:${databaseUrl}`,
+      connectionString: databaseUrl,
+    };
   }
 
   if (process.env.VERCEL || process.env.VERCEL_ENV) {
-    return '/tmp/browserbud.sqlite';
+    return {
+      kind: 'unavailable',
+      key: 'unavailable:vercel',
+      message: 'Shared analytics backend is not configured. Set BROWSERBUD_DATABASE_URL, POSTGRES_URL, or DATABASE_URL on Vercel and redeploy.',
+    };
   }
 
-  return path.resolve(process.cwd(), 'data/browserbud.sqlite');
+  const dbPath = resolveLocalAnalyticsDbPath();
+  return {
+    kind: 'sqlite',
+    key: `sqlite:${dbPath}`,
+    dbPath,
+  };
 }
 
-export function getAnalyticsStore(): AnalyticsStore {
-  const dbPath = resolveAnalyticsDbPath();
-  if (singletonStore && singletonDbPath === dbPath) {
+export async function getAnalyticsStore(): Promise<AnalyticsStoreAdapter> {
+  const config = resolveAnalyticsRuntimeConfig();
+  if (singletonStore && singletonStoreKey === config.key) {
     return singletonStore;
   }
 
   if (singletonStore) {
-    singletonStore.close();
+    await singletonStore.close();
   }
 
-  singletonStore = new AnalyticsStore({ dbPath });
-  singletonStore.initialize();
-  singletonDbPath = dbPath;
+  if (config.kind === 'postgres') {
+    singletonStore = new PostgresAnalyticsStore({ connectionString: config.connectionString });
+    await singletonStore.initialize();
+    singletonStoreKey = config.key;
+    return singletonStore;
+  }
+
+  if (config.kind === 'sqlite') {
+    const { AnalyticsStore } = await import('./analyticsStore');
+    singletonStore = new AnalyticsStore({ dbPath: config.dbPath });
+    await singletonStore.initialize();
+    singletonStoreKey = config.key;
+    return singletonStore;
+  }
+
+  singletonStore = new UnavailableAnalyticsStore(config.message);
+  singletonStoreKey = config.key;
   return singletonStore;
+}
+
+export async function closeAnalyticsStore(): Promise<void> {
+  if (!singletonStore) {
+    return;
+  }
+
+  await singletonStore.close();
+  singletonStore = null;
+  singletonStoreKey = null;
 }
