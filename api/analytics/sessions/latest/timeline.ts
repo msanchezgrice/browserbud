@@ -1,4 +1,4 @@
-import { handleLatestAnalyticsSessionTimelineRequest } from '../../../../server/analyticsWebHandlers';
+import { handleLatestAnalyticsSessionTimelineRequest } from '../../../../server/analyticsWebHandlers.js';
 
 export const runtime = 'nodejs';
 

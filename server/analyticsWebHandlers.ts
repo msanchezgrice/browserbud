@@ -4,8 +4,8 @@ import type {
   AnalyticsRawEventInput,
   AnalyticsSessionCreateInput,
 } from '../src/analyticsTypes';
-import { AnalyticsBackendUnavailableError, type AnalyticsStoreAdapter } from './analyticsBackend';
-import { getAnalyticsStore } from './analyticsRuntime';
+import { AnalyticsBackendUnavailableError, type AnalyticsStoreAdapter } from './analyticsBackend.js';
+import { getAnalyticsStore } from './analyticsRuntime.js';
 
 function corsHeaders(extraHeaders: Record<string, string> = {}): HeadersInit {
   return {

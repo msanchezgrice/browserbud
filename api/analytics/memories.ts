@@ -1,4 +1,4 @@
-import { handleAnalyticsMemoriesRequest } from '../../server/analyticsWebHandlers';
+import { handleAnalyticsMemoriesRequest } from '../../server/analyticsWebHandlers.js';
 
 export const runtime = 'nodejs';
 

@@ -1,5 +1,5 @@
-import { createAnalyticsApp } from './analyticsApp';
-import { closeAnalyticsStore, getAnalyticsStore, resolveAnalyticsRuntimeConfig } from './analyticsRuntime';
+import { createAnalyticsApp } from './analyticsApp.js';
+import { closeAnalyticsStore, getAnalyticsStore, resolveAnalyticsRuntimeConfig } from './analyticsRuntime.js';
 
 const port = Number(process.env.BROWSERBUD_LOCAL_API_PORT || 3011);
 

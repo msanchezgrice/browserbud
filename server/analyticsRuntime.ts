@@ -1,8 +1,8 @@
 import path from 'node:path';
 
-import type { AnalyticsStoreAdapter } from './analyticsBackend';
-import { PostgresAnalyticsStore } from './postgresAnalyticsStore';
-import { UnavailableAnalyticsStore } from './unavailableAnalyticsStore';
+import type { AnalyticsStoreAdapter } from './analyticsBackend.js';
+import { PostgresAnalyticsStore } from './postgresAnalyticsStore.js';
+import { UnavailableAnalyticsStore } from './unavailableAnalyticsStore.js';
 
 let singletonStore: AnalyticsStoreAdapter | null = null;
 let singletonStoreKey: string | null = null;
@@ -73,7 +73,7 @@ export async function getAnalyticsStore(): Promise<AnalyticsStoreAdapter> {
   }
 
   if (config.kind === 'sqlite') {
-    const { AnalyticsStore } = await import('./analyticsStore');
+    const { AnalyticsStore } = await import('./analyticsStore.js');
     singletonStore = new AnalyticsStore({ dbPath: config.dbPath });
     await singletonStore.initialize();
     singletonStoreKey = config.key;

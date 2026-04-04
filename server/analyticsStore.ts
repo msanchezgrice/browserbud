@@ -17,7 +17,7 @@ import type {
   AnalyticsSummaryRecord,
   SessionRecapPayload,
 } from '../src/analyticsTypes';
-import { buildSessionRecapMarkdown, buildSessionRecapPayload } from './sessionRecap';
+import { buildSessionRecapMarkdown, buildSessionRecapPayload } from './sessionRecap.js';
 
 type AnalyticsStoreOptions = {
   dbPath: string;

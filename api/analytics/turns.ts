@@ -1,4 +1,4 @@
-import { handleAnalyticsTurnsRequest } from '../../server/analyticsWebHandlers';
+import { handleAnalyticsTurnsRequest } from '../../server/analyticsWebHandlers.js';
 
 export const runtime = 'nodejs';
 

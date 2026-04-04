@@ -6,7 +6,7 @@ import type {
   AnalyticsRawEventInput,
   AnalyticsSessionCreateInput,
 } from '../src/analyticsTypes';
-import { AnalyticsBackendUnavailableError, type AnalyticsStoreAdapter } from './analyticsBackend';
+import { AnalyticsBackendUnavailableError, type AnalyticsStoreAdapter } from './analyticsBackend.js';
 
 type CreateAnalyticsAppOptions = {
   store: AnalyticsStoreAdapter;

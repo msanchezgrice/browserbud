@@ -1,4 +1,4 @@
-import { handleAnalyticsSessionRecapRequest } from '../../../../server/analyticsWebHandlers';
+import { handleAnalyticsSessionRecapRequest } from '../../../../server/analyticsWebHandlers.js';
 
 export const runtime = 'nodejs';
 

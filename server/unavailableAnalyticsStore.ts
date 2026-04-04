@@ -1,5 +1,5 @@
-import type { AnalyticsStoreAdapter } from './analyticsBackend';
-import { AnalyticsBackendUnavailableError } from './analyticsBackend';
+import type { AnalyticsStoreAdapter } from './analyticsBackend.js';
+import { AnalyticsBackendUnavailableError } from './analyticsBackend.js';
 
 export class UnavailableAnalyticsStore implements AnalyticsStoreAdapter {
   constructor(private readonly message: string) {}

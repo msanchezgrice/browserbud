@@ -14,8 +14,8 @@ import type {
   AnalyticsSummaryRecord,
   SessionRecapPayload,
 } from '../src/analyticsTypes';
-import type { AnalyticsStoreAdapter } from './analyticsBackend';
-import { buildSessionRecapMarkdown, buildSessionRecapPayload } from './sessionRecap';
+import type { AnalyticsStoreAdapter } from './analyticsBackend.js';
+import { buildSessionRecapMarkdown, buildSessionRecapPayload } from './sessionRecap.js';
 
 type PostgresAnalyticsStoreOptions = {
   connectionString: string;
