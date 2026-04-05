@@ -7,6 +7,7 @@ import remarkGfm from 'remark-gfm';
 import { DEFAULT_AUTO_SAVE_INTERVAL_MS, buildAutoSavePrompt } from './autoSave';
 import { completeAnalyticsSession, createAnalyticsSession, fetchAnalyticsSessionTimeline, fetchAnalyticsSessions, fetchLatestAnalyticsSessionTimeline, generateAnalyticsSessionRecap, recordAnalyticsEvent, recordAnalyticsMemory, recordAnalyticsTurn } from './analyticsApi';
 import type { AnalyticsMemoryInput, AnalyticsRawEventInput, AnalyticsSessionListItem, AnalyticsSessionTimeline } from './analyticsTypes';
+import { buildAppTabPath, resolveAppTabRoute, type AppTabRoute } from './appSurface';
 import { createStoredApiKeyController } from './clientConfig';
 import { buildRehydratedSessionState, buildTranscriptFeed, formatActivityLogEntry, formatLatency, mergeIncrementalTranscript, parseStoredLogEntries, serializeLogEntries, shouldCommitUserTranscript, shouldRunTimedBackgroundSave, truncateSessionHandle } from './liveUtils';
 import { buildLocalSessionRecapSummary, getLatestStoredAnalyticsSessionTimeline, getStoredAnalyticsSessionTimeline, listStoredAnalyticsSessions, upsertStoredAnalyticsTimeline } from './localAnalyticsHistory';
@@ -92,7 +93,7 @@ const FREQUENCIES = [
   { id: 60000, name: 'Every 1 minute' },
 ];
 
-type AppTab = 'transcript' | 'info' | 'activity' | 'notes' | 'history' | 'memory';
+type AppTab = AppTabRoute;
 
 type LogEntry = {
   id: string;
@@ -242,6 +243,9 @@ const TAB_BUTTONS: Array<{
 const MARKDOWN_PROSE_CLASS =
   'prose prose-stone prose-headings:text-stone-900 prose-p:text-stone-700 prose-strong:text-stone-900 prose-a:text-teal-600 prose-code:text-teal-700 prose-pre:bg-stone-950 prose-pre:text-stone-100 max-w-none';
 
+const COMPACT_MARKDOWN_PROSE_CLASS =
+  `${MARKDOWN_PROSE_CLASS} prose-sm prose-headings:mb-2 prose-headings:mt-4 prose-p:my-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-hr:my-4`;
+
 function stripSessionRecapHeading(markdown: string | null | undefined): string {
   return (markdown || '').replace(/^# Session Recap\s*/i, '').trim();
 }
@@ -294,7 +298,9 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
   // Notepad State
-  const [activeTab, setActiveTab] = useState<AppTab>('transcript');
+  const [activeTab, setActiveTab] = useState<AppTab>(() => (
+    typeof window === 'undefined' ? 'transcript' : resolveAppTabRoute(window.location.pathname)
+  ));
   const [helpfulInfo, setHelpfulInfo] = useState<string>(() => readStoredText(STORAGE_KEYS.helpfulInfo));
   const [activityLog, setActivityLog] = useState<string>(() => readStoredText(STORAGE_KEYS.activityLog));
   const [savedNotes, setSavedNotes] = useState<string>(() => readStoredText(STORAGE_KEYS.savedNotes));
@@ -330,6 +336,7 @@ export default function App() {
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const tabContentScrollRef = useRef<HTMLDivElement>(null);
   const settingsPanelRef = useRef<HTMLDivElement>(null);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   
@@ -430,6 +437,24 @@ export default function App() {
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [showSettingsPanel]);
+
+  useEffect(() => {
+    const syncTabFromLocation = () => {
+      setActiveTab(resolveAppTabRoute(window.location.pathname));
+    };
+
+    window.addEventListener('popstate', syncTabFromLocation);
+    return () => {
+      window.removeEventListener('popstate', syncTabFromLocation);
+    };
+  }, []);
+
+  useEffect(() => {
+    const targetPath = buildAppTabPath(activeTab);
+    if (window.location.pathname !== targetPath) {
+      window.history.replaceState(window.history.state, '', targetPath);
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.helpfulInfo, helpfulInfo);
@@ -1957,6 +1982,7 @@ Tool rules:
       timestamp,
     }];
   });
+  const orderedTranscriptFeed = [...transcriptFeed].reverse();
   const latestHistorySession = historySessions[0] || null;
   const selectedHistorySummary = selectedHistorySession?.latestSummary
     || selectedHistoryTimeline?.summaries.find((summary) => summary.summaryKind === 'session_recap')
@@ -1967,6 +1993,25 @@ Tool rules:
   const featuredMemorySession = selectedHistorySession || latestHistorySession;
   const featuredMemorySummary = selectedHistorySummary || latestHistorySummary;
   const featuredMemoryMarkdown = stripSessionRecapHeading(featuredMemorySummary?.markdown);
+
+  useEffect(() => {
+    if (activeTab !== 'transcript') {
+      return;
+    }
+
+    const scrollContainer = tabContentScrollRef.current;
+    if (!scrollContainer) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [activeTab, orderedTranscriptFeed.length, liveDraftTranscript?.text]);
 
   if (!runtimeSupport.supported) {
     return (
@@ -2450,7 +2495,7 @@ Tool rules:
 	          </div>
 
           {/* Tab Content */}
-          <div className="flex-1 min-h-0 overflow-y-auto p-6 relative custom-scrollbar">
+          <div ref={tabContentScrollRef} className="flex-1 min-h-0 overflow-y-auto p-6 relative custom-scrollbar">
             <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">{TAB_METADATA[activeTab].label}</div>
@@ -2463,13 +2508,13 @@ Tool rules:
 
             {/* Transcript Tab */}
             {activeTab === 'transcript' && (
-              <div className="min-h-full flex flex-col-reverse gap-4">
+              <div className="min-h-full flex flex-col gap-4">
                 <AnimatePresence initial={false}>
-                  {transcriptFeed.map((log, i) => {
+                  {orderedTranscriptFeed.map((log, i) => {
                     const isSystem = log.role === 'system';
                     const isUser = log.role === 'user';
                     const isDraft = Boolean(log.isDraft);
-                    const isNewestCompanion = log.role === 'model' && i === 0;
+                    const isNewestCompanion = log.role === 'model' && i === orderedTranscriptFeed.length - 1;
                     const Icon = isSystem ? Settings : isUser ? User : Monitor;
                     const label = isSystem ? 'System' : isUser ? 'You' : 'Companion';
                     const cardClassName = isSystem
@@ -2552,7 +2597,7 @@ Tool rules:
 	            {activeTab === 'info' && (
 	              <div className="min-h-full">
 	                {helpfulInfo ? (
-	                  <div className={MARKDOWN_PROSE_CLASS}>
+	                  <div className={COMPACT_MARKDOWN_PROSE_CLASS}>
 	                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{helpfulInfo}</ReactMarkdown>
 	                  </div>
 	                ) : (
@@ -2568,7 +2613,7 @@ Tool rules:
 	            {activeTab === 'activity' && (
 	              <div className="min-h-full">
 	                {activityLog ? (
-	                  <div className={MARKDOWN_PROSE_CLASS}>
+	                  <div className={COMPACT_MARKDOWN_PROSE_CLASS}>
 	                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{activityLog}</ReactMarkdown>
 	                  </div>
 	                ) : (
