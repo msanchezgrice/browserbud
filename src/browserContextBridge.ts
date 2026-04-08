@@ -1,10 +1,17 @@
 import { isBrowserContextPacket, type BrowserContextPacket } from './browserContext';
 
-export type BrowserBudBridgeRequestType = 'REQUEST_ACTIVE_CONTEXT' | 'REQUEST_EXTENSION_STATUS';
+export type BrowserBudBridgeRequestType =
+  | 'REQUEST_ACTIVE_CONTEXT'
+  | 'REQUEST_EXTENSION_STATUS'
+  | 'REQUEST_PAGE_RESOURCE';
 
 type BrowserBudBridgeRequest = {
   source: 'browserbud-app';
   type: `BROWSERBUD_${BrowserBudBridgeRequestType}`;
+  payload?: {
+    requestId?: string;
+    url?: string;
+  };
 };
 
 type BrowserBudBridgeReadyMessage = {
@@ -21,14 +28,37 @@ type BrowserBudBridgePacketMessage = {
   payload: BrowserContextPacket;
 };
 
+export type BrowserBudPageResourceResponse = {
+  requestId: string;
+  ok: boolean;
+  url: string;
+  contentType: string | null;
+  text?: string | null;
+  dataBase64?: string | null;
+  byteLength?: number | null;
+  truncated?: boolean;
+  error?: string | null;
+};
+
+type BrowserBudBridgeResourceMessage = {
+  source: 'browserbud-extension';
+  type: 'BROWSERBUD_PAGE_RESOURCE_RESPONSE';
+  payload: BrowserBudPageResourceResponse;
+};
+
 export type BrowserBudBridgeEvent =
   | { kind: 'ready'; version: string }
-  | { kind: 'packet'; packet: BrowserContextPacket };
+  | { kind: 'packet'; packet: BrowserContextPacket }
+  | { kind: 'resource'; response: BrowserBudPageResourceResponse };
 
-export function createBrowserBudBridgeRequest(type: BrowserBudBridgeRequestType): BrowserBudBridgeRequest {
+export function createBrowserBudBridgeRequest(
+  type: BrowserBudBridgeRequestType,
+  payload?: BrowserBudBridgeRequest['payload'],
+): BrowserBudBridgeRequest {
   return {
     source: 'browserbud-app',
     type: `BROWSERBUD_${type}`,
+    ...(payload ? { payload } : {}),
   };
 }
 
@@ -61,6 +91,31 @@ export function parseBrowserBudBridgeMessage(value: unknown): BrowserBudBridgeEv
       kind: 'packet',
       packet: message.payload,
     };
+  }
+
+  if (message.type === 'BROWSERBUD_PAGE_RESOURCE_RESPONSE') {
+    const payload = message.payload as BrowserBudBridgeResourceMessage['payload'];
+    if (
+      payload
+      && typeof payload.requestId === 'string'
+      && typeof payload.ok === 'boolean'
+      && typeof payload.url === 'string'
+    ) {
+      return {
+        kind: 'resource',
+        response: {
+          requestId: payload.requestId,
+          ok: payload.ok,
+          url: payload.url,
+          contentType: typeof payload.contentType === 'string' ? payload.contentType : null,
+          text: typeof payload.text === 'string' ? payload.text : null,
+          dataBase64: typeof payload.dataBase64 === 'string' ? payload.dataBase64 : null,
+          byteLength: typeof payload.byteLength === 'number' ? payload.byteLength : null,
+          truncated: Boolean(payload.truncated),
+          error: typeof payload.error === 'string' ? payload.error : null,
+        },
+      };
+    }
   }
 
   return null;
@@ -96,4 +151,40 @@ export function subscribeToBrowserBudBridge(
   return () => {
     window.removeEventListener('message', handleMessage);
   };
+}
+
+export function requestBrowserBudPageResource(
+  url: string,
+  timeoutMs = 20000,
+): Promise<BrowserBudPageResourceResponse | null> {
+  if (typeof window === 'undefined' || !url) {
+    return Promise.resolve(null);
+  }
+
+  const requestId = `page-resource-${Math.random().toString(36).slice(2)}`;
+
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, timeoutMs);
+
+    const cleanup = subscribeToBrowserBudBridge((event) => {
+      if (event.kind !== 'resource' || event.response.requestId !== requestId) {
+        return;
+      }
+
+      window.clearTimeout(timeout);
+      cleanup();
+      resolve(event.response);
+    });
+
+    window.postMessage(
+      createBrowserBudBridgeRequest('REQUEST_PAGE_RESOURCE', {
+        requestId,
+        url,
+      }),
+      window.location.origin,
+    );
+  });
 }

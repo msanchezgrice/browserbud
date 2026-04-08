@@ -4,10 +4,21 @@ const APP_ORIGINS = new Set([
   'http://127.0.0.1:3010',
 ]);
 
+const MAX_DOCUMENT_TEXT_CHARS = 240000;
+
 const isBrowserBudPage = APP_ORIGINS.has(window.location.origin);
 
 function cleanText(value) {
   return (value || '').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeDocumentText(value) {
+  return (value || '')
+    .replace(/\r/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
 }
 
 function limitText(value, maxLength) {
@@ -161,6 +172,24 @@ function readMainTextExcerpt() {
   return limitText(root?.textContent || '', 280);
 }
 
+function readDocumentText() {
+  const root = document.querySelector('main, article, [role="main"]') || document.body;
+  const fullText = normalizeDocumentText(root?.innerText || root?.textContent || '');
+  if (!fullText) {
+    return {
+      text: '',
+      textLength: 0,
+      truncated: false,
+    };
+  }
+
+  return {
+    text: fullText.slice(0, MAX_DOCUMENT_TEXT_CHARS),
+    textLength: fullText.length,
+    truncated: fullText.length > MAX_DOCUMENT_TEXT_CHARS,
+  };
+}
+
 function readAnchors() {
   return [...document.querySelectorAll('a[href], button, [role="button"], input[type="submit"], input[type="button"]')]
     .filter(isVisible)
@@ -190,6 +219,7 @@ function readAnchors() {
 function collectPageContext(navEvent) {
   const primaryNavRoot = document.querySelector('header nav, nav[aria-label*="primary" i], nav[aria-label*="main" i]');
   const localNavRoot = document.querySelector('aside nav, nav[aria-label*="section" i], nav[aria-label*="local" i]');
+  const documentText = readDocumentText();
 
   return {
     packetVersion: 1,
@@ -208,6 +238,9 @@ function collectPageContext(navEvent) {
       hash: window.location.hash,
       pageTypeHint: cleanText(document.body?.getAttribute('data-page-type')) || null,
       mainTextExcerpt: readMainTextExcerpt(),
+      documentText: documentText.text || null,
+      documentTextLength: documentText.textLength,
+      documentTextTruncated: documentText.truncated,
     },
     location: {
       activeSection: inferActiveSection(),
@@ -278,6 +311,27 @@ if (isBrowserBudPage) {
             payload: response.packet,
           });
         }
+      });
+      return;
+    }
+
+    if (message.type === 'BROWSERBUD_REQUEST_PAGE_RESOURCE') {
+      chrome.runtime.sendMessage({
+        type: 'BROWSERBUD_REQUEST_PAGE_RESOURCE',
+        requestId: message.payload?.requestId,
+        url: message.payload?.url,
+      }, (response) => {
+        postToBrowserBudPage({
+          source: 'browserbud-extension',
+          type: 'BROWSERBUD_PAGE_RESOURCE_RESPONSE',
+          payload: response || {
+            requestId: message.payload?.requestId || 'unknown',
+            ok: false,
+            url: typeof message.payload?.url === 'string' ? message.payload.url : '',
+            contentType: null,
+            error: 'Extension fetch failed.',
+          },
+        });
       });
     }
   });

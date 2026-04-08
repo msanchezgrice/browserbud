@@ -3,8 +3,10 @@ import test from 'node:test';
 
 import {
   buildBrowserContextPrompt,
+  buildCurrentPageToolSnapshot,
   getCaptureModeRequirements,
   isSignificantBrowserContextUpdate,
+  searchBrowserContextDocument,
   type BrowserContextPacket,
 } from '../src/browserContext';
 
@@ -26,6 +28,13 @@ function createPacket(overrides: Partial<BrowserContextPacket> = {}): BrowserCon
       hash: '',
       pageTypeHint: 'pricing',
       mainTextExcerpt: 'Compare plans and find the right BrowserBud tier.',
+      documentText: [
+        'BrowserBud pricing overview.',
+        'Starter plan includes browser memory.',
+        'Enterprise plan includes admin controls and support.',
+        'Contact sales for custom contracts.',
+      ].join('\n\n'),
+      documentTextLength: 146,
     },
     location: {
       activeSection: 'Pricing table',
@@ -134,4 +143,22 @@ test('isSignificantBrowserContextUpdate ignores duplicate snapshots and catches 
 
   assert.equal(isSignificantBrowserContextUpdate(first, duplicate), false);
   assert.equal(isSignificantBrowserContextUpdate(first, changed), true);
+});
+
+test('searchBrowserContextDocument returns relevant document chunks from off-screen page text', () => {
+  const results = searchBrowserContextDocument(createPacket(), 'enterprise support');
+
+  assert.equal(results.length > 0, true);
+  assert.match(results[0], /Enterprise plan includes admin controls and support/);
+});
+
+test('buildCurrentPageToolSnapshot returns a compact tool payload for current-page inspection', () => {
+  const snapshot = buildCurrentPageToolSnapshot(createPacket());
+
+  assert.equal(snapshot.url, 'https://browserbud.com/pricing');
+  assert.equal(snapshot.title, 'Pricing - BrowserBud');
+  assert.equal(snapshot.documentTextLength, 146);
+  assert.equal(snapshot.topHeadings[0], 'Pricing');
+  assert.equal(snapshot.anchorNames[0], 'Start free trial');
+  assert.match(snapshot.documentExcerpt, /BrowserBud pricing overview/);
 });

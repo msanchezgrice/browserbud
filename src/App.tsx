@@ -8,9 +8,25 @@ import { DEFAULT_AUTO_SAVE_INTERVAL_MS, buildAutoSavePrompt } from './autoSave';
 import { completeAnalyticsSession, createAnalyticsSession, fetchAnalyticsSessionTimeline, fetchAnalyticsSessions, fetchLatestAnalyticsSessionTimeline, generateAnalyticsSessionRecap, recordAnalyticsEvent, recordAnalyticsMemory, recordAnalyticsTurn } from './analyticsApi';
 import type { AnalyticsMemoryInput, AnalyticsRawEventInput, AnalyticsSessionListItem, AnalyticsSessionTimeline } from './analyticsTypes';
 import { buildAppTabPath, resolveAppTabRoute, type AppTabRoute } from './appSurface';
-import { buildBrowserContextPrompt, getCaptureModeRequirements, isSignificantBrowserContextUpdate, type BrowserContextPacket, type CaptureMode } from './browserContext';
+import {
+  buildBrowserContextPrompt,
+  buildCurrentPageToolSnapshot,
+  getCaptureModeRequirements,
+  isSignificantBrowserContextUpdate,
+  readDocumentTextChunk,
+  searchBrowserContextDocument,
+  type BrowserContextPacket,
+  type CaptureMode,
+} from './browserContext';
 import { postBrowserBudBridgeRequest, subscribeToBrowserBudBridge } from './browserContextBridge';
 import { createStoredApiKeyController } from './clientConfig';
+import {
+  buildCurrentPageToolResult,
+  readCurrentPageDocumentChunk,
+  resolveCurrentPageDocument,
+  searchCurrentPageDocument,
+  type CurrentPageDocument,
+} from './currentPageDocument';
 import { buildRehydratedSessionState, buildTranscriptFeed, formatActivityLogEntry, formatLatency, mergeIncrementalTranscript, parseStoredLogEntries, serializeLogEntries, shouldCommitUserTranscript, shouldRunTimedBackgroundSave, truncateSessionHandle } from './liveUtils';
 import { buildLocalSessionRecapSummary, getLatestStoredAnalyticsSessionTimeline, getStoredAnalyticsSessionTimeline, listStoredAnalyticsSessions, upsertStoredAnalyticsTimeline } from './localAnalyticsHistory';
 import { getRuntimeSupport } from './runtimeSupport';
@@ -405,6 +421,7 @@ export default function App() {
   const latestBrowserContextRef = useRef<BrowserContextPacket | null>(null);
   const previousBrowserContextRef = useRef<BrowserContextPacket | null>(null);
   const lastInjectedBrowserContextPromptRef = useRef<string | null>(null);
+  const currentPageDocumentCacheRef = useRef<Map<string, CurrentPageDocument>>(new Map());
   
   // Interval Refs
   const videoIntervalRef = useRef<number | null>(null);
@@ -449,9 +466,13 @@ export default function App() {
 
     const unsubscribe = subscribeToBrowserBudBridge((event) => {
       setExtensionBridgeChecked(true);
-      setExtensionBridgeReady(true);
       if (event.kind === 'ready') {
+        setExtensionBridgeReady(true);
         setExtensionVersion(event.version);
+        return;
+      }
+
+      if (event.kind === 'resource') {
         return;
       }
 
@@ -1269,6 +1290,40 @@ export default function App() {
     });
   };
 
+  const getCurrentPageDocument = async (): Promise<CurrentPageDocument | null> => {
+    const packet = latestBrowserContextRef.current;
+    if (!packet) {
+      return null;
+    }
+
+    const cached = currentPageDocumentCacheRef.current.get(packet.url);
+    const packetDocumentLength = packet.page.documentTextLength ?? packet.page.documentText?.length ?? 0;
+    if (
+      cached
+      && (
+        cached.source !== 'extension-context'
+        || (!packet.page.documentTextTruncated && cached.documentTextLength === packetDocumentLength)
+      )
+    ) {
+      return cached;
+    }
+
+    const resolved = await resolveCurrentPageDocument(packet);
+    if (!resolved) {
+      return null;
+    }
+
+    currentPageDocumentCacheRef.current.set(packet.url, resolved);
+    if (currentPageDocumentCacheRef.current.size > 4) {
+      const oldestKey = currentPageDocumentCacheRef.current.keys().next().value;
+      if (oldestKey) {
+        currentPageDocumentCacheRef.current.delete(oldestKey);
+      }
+    }
+
+    return resolved;
+  };
+
   const maybeTriggerTimedHelpfulInfoSave = async () => {
     if (!shouldRunTimedBackgroundSave({
       frequencyMs: frequency,
@@ -1668,7 +1723,8 @@ Tool rules:
 - Do not use tools on every turn.
 - Prioritize clean, complete spoken responses over fragmented quick replies.
 ${screenContextEnabled ? '- You receive live screen imagery from the current shared screen or tab. Use it as visual truth for what is actually visible.' : ''}
-${browserContextEnabled ? '- You also receive browser-native page context updates including URL, title, page structure, navigation, and visible action anchors. Use that context to improve navigation help and site understanding.' : ''}` }]
+${browserContextEnabled ? '- You also receive browser-native page context updates including URL, title, page structure, navigation, visible action anchors, and a current-page document corpus.' : ''}
+${browserContextEnabled ? '- When the user asks about off-screen content, page content below the fold, long articles, docs, or PDFs, use inspectCurrentPage, readCurrentPageChunk, and searchCurrentPage before answering. Do not pretend you have the full document if you have not inspected it.' : ''}` }]
         },
         speechConfig: {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedPersonality.voiceName } }
@@ -1712,7 +1768,41 @@ ${browserContextEnabled ? '- You also receive browser-native page context update
                 },
                 required: ['note']
               }
-            }
+            },
+            ...(browserContextEnabled
+              ? [
+                {
+                  name: 'inspectCurrentPage',
+                  description: 'Inspect the current page corpus, including off-screen content when available, before answering questions about long pages or documents.',
+                  parameters: {
+                    type: Type.OBJECT,
+                    properties: {},
+                  },
+                },
+                {
+                  name: 'readCurrentPageChunk',
+                  description: 'Read a specific chunk from the current page corpus. Use this to walk through long pages or PDFs in order.',
+                  parameters: {
+                    type: Type.OBJECT,
+                    properties: {
+                      chunkNumber: { type: Type.NUMBER, description: 'The 1-based chunk number to read from the current page corpus.' },
+                    },
+                    required: ['chunkNumber'],
+                  },
+                },
+                {
+                  name: 'searchCurrentPage',
+                  description: 'Search the current page corpus, including off-screen page text, for relevant passages.',
+                  parameters: {
+                    type: Type.OBJECT,
+                    properties: {
+                      query: { type: Type.STRING, description: 'The term, phrase, or question to search for in the current page corpus.' },
+                    },
+                    required: ['query'],
+                  },
+                },
+              ]
+              : [])
           ]
         }],
         toolConfig: {
@@ -1947,94 +2037,195 @@ ${browserContextEnabled ? '- You also receive browser-native page context update
               pendingTurnRef.current = true;
               const functionCalls = message.toolCall.functionCalls;
               if (functionCalls) {
-                const functionResponses: any[] = [];
-                for (const call of functionCalls) {
-                  const timestamp = new Date().toLocaleTimeString();
+                void (async () => {
+                  const functionResponses: any[] = [];
 
-                  if (call.name === 'appendHelpfulInfo') {
-                    const args = call.args as any;
-                    appendHelpfulInfoEntry({
-                      title: args.title,
-                      content: args.content,
-                      source: 'live-tool',
-                    });
-                    functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
-                  } else if (call.name === 'logActivity') {
-                    const args = call.args as any;
-                    const logEntry = formatActivityLogEntry(args, timestamp);
-                    const eventId = crypto.randomUUID();
-                    const pageTitle = typeof args.pageTitle === 'string' ? args.pageTitle.trim() : '';
-                    const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
-                    const urlValue = typeof args.url === 'string' ? args.url.trim() : '';
-                    let sourceUrl: string | null = null;
-                    let sourceDomain: string | null = null;
-                    try {
-                      if (urlValue) {
-                        const parsed = new URL(urlValue);
-                        sourceUrl = parsed.toString();
-                        sourceDomain = parsed.hostname;
+                  for (const call of functionCalls) {
+                    const timestamp = new Date().toLocaleTimeString();
+
+                    if (call.name === 'appendHelpfulInfo') {
+                      const args = call.args as any;
+                      appendHelpfulInfoEntry({
+                        title: args.title,
+                        content: args.content,
+                        source: 'live-tool',
+                      });
+                      functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
+                      continue;
+                    }
+
+                    if (call.name === 'logActivity') {
+                      const args = call.args as any;
+                      const logEntry = formatActivityLogEntry(args, timestamp);
+                      const eventId = crypto.randomUUID();
+                      const pageTitle = typeof args.pageTitle === 'string' ? args.pageTitle.trim() : '';
+                      const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
+                      const urlValue = typeof args.url === 'string' ? args.url.trim() : '';
+                      let sourceUrl: string | null = null;
+                      let sourceDomain: string | null = null;
+                      try {
+                        if (urlValue) {
+                          const parsed = new URL(urlValue);
+                          sourceUrl = parsed.toString();
+                          sourceDomain = parsed.hostname;
+                        }
+                      } catch {}
+                      setActivityLog((prev) => logEntry + prev);
+                      setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Logged structured activity to the Activity Log tab.', role: 'system' }, ...prev]);
+                      recordAnalyticsEventSafe({
+                        id: eventId,
+                        source: 'browserbud-ui',
+                        eventType: 'tool.activity_logged',
+                        appName: typeof args.appName === 'string' ? args.appName.trim() : null,
+                        url: sourceUrl,
+                        domain: sourceDomain,
+                        pageTitle: pageTitle || null,
+                        payload: {
+                          appName: args.appName,
+                          pageTitle: args.pageTitle,
+                          url: args.url,
+                          summary: args.summary,
+                          details: args.details,
+                        },
+                      });
+                      recordAnalyticsMemorySafe({
+                        memoryType: 'activity_log',
+                        title: summary || pageTitle || 'Activity logged',
+                        bodyMd: logEntry,
+                        sourceUrl,
+                        sourceEventIds: [eventId],
+                      });
+                      functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
+                      continue;
+                    }
+
+                    if (call.name === 'saveNote') {
+                      const args = call.args as any;
+                      const noteEntry = `- **[${timestamp}]** ${args.note}\n`;
+                      const eventId = crypto.randomUUID();
+                      setSavedNotes((prev) => noteEntry + prev);
+                      setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Saved note to the Saved Notes tab.', role: 'system' }, ...prev]);
+                      recordAnalyticsEventSafe({
+                        id: eventId,
+                        source: 'browserbud-ui',
+                        eventType: 'tool.note_saved',
+                        payload: {
+                          note: args.note,
+                        },
+                      });
+                      recordAnalyticsMemorySafe({
+                        memoryType: 'saved_note',
+                        title: typeof args.note === 'string' && args.note.trim() ? args.note.trim().slice(0, 80) : 'Saved Note',
+                        bodyMd: typeof args.note === 'string' ? args.note : '',
+                        sourceEventIds: [eventId],
+                      });
+                      functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
+                      continue;
+                    }
+
+                    if (call.name === 'inspectCurrentPage') {
+                      const packet = latestBrowserContextRef.current;
+                      if (!packet) {
+                        functionResponses.push({ id: call.id, name: call.name, response: { error: 'No active browser context is available yet.' } });
+                        continue;
                       }
-                    } catch {}
-                    setActivityLog((prev) => logEntry + prev);
-                    setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Logged structured activity to the Activity Log tab.', role: 'system' }, ...prev]);
-                    recordAnalyticsEventSafe({
-                      id: eventId,
-                      source: 'browserbud-ui',
-                      eventType: 'tool.activity_logged',
-                      appName: typeof args.appName === 'string' ? args.appName.trim() : null,
-                      url: sourceUrl,
-                      domain: sourceDomain,
-                      pageTitle: pageTitle || null,
-                      payload: {
-                        appName: args.appName,
-                        pageTitle: args.pageTitle,
-                        url: args.url,
-                        summary: args.summary,
-                        details: args.details,
-                      },
-                    });
-                    recordAnalyticsMemorySafe({
-                      memoryType: 'activity_log',
-                      title: summary || pageTitle || 'Activity logged',
-                      bodyMd: logEntry,
-                      sourceUrl,
-                      sourceEventIds: [eventId],
-                    });
-                    functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
-                  } else if (call.name === 'saveNote') {
-                    const args = call.args as any;
-                    const noteEntry = `- **[${timestamp}]** ${args.note}\n`;
-                    const eventId = crypto.randomUUID();
-                    setSavedNotes((prev) => noteEntry + prev);
-                    setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Saved note to the Saved Notes tab.', role: 'system' }, ...prev]);
-                    recordAnalyticsEventSafe({
-                      id: eventId,
-                      source: 'browserbud-ui',
-                      eventType: 'tool.note_saved',
-                      payload: {
-                        note: args.note,
-                      },
-                    });
-                    recordAnalyticsMemorySafe({
-                      memoryType: 'saved_note',
-                      title: typeof args.note === 'string' && args.note.trim() ? args.note.trim().slice(0, 80) : 'Saved Note',
-                      bodyMd: typeof args.note === 'string' ? args.note : '',
-                      sourceEventIds: [eventId],
-                    });
-                    functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
-                  }
-                }
 
-                if (functionResponses.length) {
-                  sessionPromise.then((session) => {
-                    session.sendToolResponse({ functionResponses });
+                      const document = await getCurrentPageDocument();
+                      const snapshot = buildCurrentPageToolSnapshot(packet);
+                      functionResponses.push({
+                        id: call.id,
+                        name: call.name,
+                        response: {
+                          ...snapshot,
+                          fullDocumentAvailable: Boolean(document),
+                          ...(document ? buildCurrentPageToolResult(document) : {}),
+                        },
+                      });
+                      continue;
+                    }
+
+                    if (call.name === 'readCurrentPageChunk') {
+                      const packet = latestBrowserContextRef.current;
+                      const args = call.args as any;
+                      if (!packet) {
+                        functionResponses.push({ id: call.id, name: call.name, response: { error: 'No active browser context is available yet.' } });
+                        continue;
+                      }
+
+                      const chunkNumber = Number(args?.chunkNumber) || 1;
+                      const document = await getCurrentPageDocument();
+                      const chunk = document
+                        ? readCurrentPageDocumentChunk(document, chunkNumber)
+                        : readDocumentTextChunk(packet.page.documentText || packet.page.mainTextExcerpt || '', chunkNumber);
+
+                      if (!chunk) {
+                        functionResponses.push({
+                          id: call.id,
+                          name: call.name,
+                          response: {
+                            error: 'No readable page corpus is available for the current page.',
+                            url: packet.url,
+                          },
+                        });
+                        continue;
+                      }
+
+                      functionResponses.push({
+                        id: call.id,
+                        name: call.name,
+                        response: {
+                          url: packet.url,
+                          title: packet.title,
+                          source: document?.source || 'extension-context',
+                          chunkNumber: chunk.chunkNumber,
+                          totalChunks: chunk.totalChunks,
+                          text: chunk.text,
+                        },
+                      });
+                      continue;
+                    }
+
+                    if (call.name === 'searchCurrentPage') {
+                      const packet = latestBrowserContextRef.current;
+                      const args = call.args as any;
+                      const query = typeof args?.query === 'string' ? args.query : '';
+                      if (!packet) {
+                        functionResponses.push({ id: call.id, name: call.name, response: { error: 'No active browser context is available yet.' } });
+                        continue;
+                      }
+
+                      const document = await getCurrentPageDocument();
+                      const results = document
+                        ? searchCurrentPageDocument(document, query, 4)
+                        : searchBrowserContextDocument(packet, query, 4);
+                      functionResponses.push({
+                        id: call.id,
+                        name: call.name,
+                        response: {
+                          url: packet.url,
+                          title: packet.title,
+                          query,
+                          resultCount: results.length,
+                          results,
+                          source: document?.source || 'extension-context',
+                        },
+                      });
+                    }
+                  }
+
+                  if (functionResponses.length) {
+                    sessionPromise.then((session) => {
+                      session.sendToolResponse({ functionResponses });
+                      pendingToolCallRef.current = false;
+                    }).catch(() => {
+                      pendingToolCallRef.current = false;
+                    });
+                  } else {
                     pendingToolCallRef.current = false;
-                  }).catch(() => {
-                    pendingToolCallRef.current = false;
-                  });
-                } else {
+                  }
+                })().catch(() => {
                   pendingToolCallRef.current = false;
-                }
+                });
               }
             }
           },

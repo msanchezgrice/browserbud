@@ -49,6 +49,18 @@ test('createBrowserBudBridgeRequest builds an app-to-extension request envelope'
     source: 'browserbud-app',
     type: 'BROWSERBUD_REQUEST_ACTIVE_CONTEXT',
   });
+
+  assert.deepEqual(createBrowserBudBridgeRequest('REQUEST_PAGE_RESOURCE', {
+    requestId: 'request-1',
+    url: 'https://browserbud.com/pricing.pdf',
+  }), {
+    source: 'browserbud-app',
+    type: 'BROWSERBUD_REQUEST_PAGE_RESOURCE',
+    payload: {
+      requestId: 'request-1',
+      url: 'https://browserbud.com/pricing.pdf',
+    },
+  });
 });
 
 test('parseBrowserBudBridgeMessage recognizes extension ready and context packets', () => {
@@ -68,6 +80,32 @@ test('parseBrowserBudBridgeMessage recognizes extension ready and context packet
   }), {
     kind: 'packet',
     packet,
+  });
+
+  assert.deepEqual(parseBrowserBudBridgeMessage({
+    source: 'browserbud-extension',
+    type: 'BROWSERBUD_PAGE_RESOURCE_RESPONSE',
+    payload: {
+      requestId: 'request-1',
+      ok: true,
+      url: 'https://browserbud.com/pricing.pdf',
+      contentType: 'application/pdf',
+      dataBase64: 'abc123',
+      byteLength: 1024,
+    },
+  }), {
+    kind: 'resource',
+    response: {
+      requestId: 'request-1',
+      ok: true,
+      url: 'https://browserbud.com/pricing.pdf',
+      contentType: 'application/pdf',
+      text: null,
+      dataBase64: 'abc123',
+      byteLength: 1024,
+      truncated: false,
+      error: null,
+    },
   });
 });
 

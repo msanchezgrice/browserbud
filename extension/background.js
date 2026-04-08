@@ -4,6 +4,9 @@ const APP_ORIGINS = new Set([
   'http://127.0.0.1:3010',
 ]);
 
+const MAX_TEXT_RESPONSE_CHARS = 500000;
+const MAX_BINARY_RESPONSE_BYTES = 15 * 1024 * 1024;
+
 function isHttpUrl(url) {
   return typeof url === 'string' && /^https?:\/\//.test(url);
 }
@@ -25,6 +28,85 @@ async function sendMessageToTab(tabId, message) {
     return await chrome.tabs.sendMessage(tabId, message);
   } catch {
     return null;
+  }
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, offset + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function looksLikePdf(url, contentType) {
+  return /application\/pdf/i.test(contentType || '') || /\.pdf(?:$|[?#])/i.test(url);
+}
+
+async function fetchPageResource(url) {
+  if (!isHttpUrl(url)) {
+    return {
+      ok: false,
+      url: typeof url === 'string' ? url : '',
+      contentType: null,
+      error: 'Only http and https URLs are supported.',
+    };
+  }
+
+  try {
+    const response = await fetch(url, {
+      credentials: 'include',
+    });
+    const contentType = response.headers.get('content-type');
+    if (!response.ok) {
+      return {
+        ok: false,
+        url,
+        contentType,
+        error: `Request failed with status ${response.status}.`,
+      };
+    }
+
+    if (looksLikePdf(url, contentType)) {
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength > MAX_BINARY_RESPONSE_BYTES) {
+        return {
+          ok: false,
+          url,
+          contentType,
+          error: `Document exceeds the ${Math.round(MAX_BINARY_RESPONSE_BYTES / (1024 * 1024))}MB fetch limit.`,
+          byteLength: buffer.byteLength,
+        };
+      }
+
+      return {
+        ok: true,
+        url,
+        contentType,
+        dataBase64: arrayBufferToBase64(buffer),
+        byteLength: buffer.byteLength,
+      };
+    }
+
+    const text = await response.text();
+    return {
+      ok: true,
+      url,
+      contentType,
+      text: text.slice(0, MAX_TEXT_RESPONSE_CHARS),
+      byteLength: text.length,
+      truncated: text.length > MAX_TEXT_RESPONSE_CHARS,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      url,
+      contentType: null,
+      error: error instanceof Error ? error.message : 'Unknown fetch failure.',
+    };
   }
 }
 
@@ -103,6 +185,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ok: true,
         packet,
         version: chrome.runtime.getManifest().version,
+      });
+    });
+    return true;
+  }
+
+  if (message?.type === 'BROWSERBUD_REQUEST_PAGE_RESOURCE') {
+    fetchPageResource(message.url).then((response) => {
+      sendResponse({
+        requestId: typeof message.requestId === 'string' ? message.requestId : 'unknown',
+        ...response,
       });
     });
     return true;
