@@ -246,7 +246,9 @@ export function buildBrowserContextPrompt(packet: BrowserContextPacket): string 
   const documentTextLength = packet.page.documentTextLength ?? getBrowserContextDocumentText(packet).length;
 
   const lines = [
-    'Context update only. Do not respond aloud to this message.',
+    'Supplemental browser context update only. Do not respond aloud to this message.',
+    'Live screen imagery remains the source of truth for what is visibly on screen right now.',
+    'This browser context may include off-screen content or may lag behind the current visible state. Use it for structure, navigation, URLs, and off-screen document understanding.',
     `Active domain: ${packet.domain}`,
     `Current URL: ${packet.url}`,
     `Current path: ${packet.page.pathname || '/'}`,

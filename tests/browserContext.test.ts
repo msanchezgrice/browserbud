@@ -107,7 +107,8 @@ test('getCaptureModeRequirements treats multimodal as screen plus extension', ()
 test('buildBrowserContextPrompt compresses useful site context for live enrichment', () => {
   const prompt = buildBrowserContextPrompt(createPacket());
 
-  assert.match(prompt, /Context update only/i);
+  assert.match(prompt, /Supplemental browser context update only/i);
+  assert.match(prompt, /source of truth for what is visibly on screen right now/i);
   assert.match(prompt, /browserbud\.com/i);
   assert.match(prompt, /\/pricing/);
   assert.match(prompt, /Pricing table/);

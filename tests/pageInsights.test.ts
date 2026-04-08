@@ -82,6 +82,8 @@ test('buildPageInsightContextPrompt turns cached analysis into a compact context
   const prompt = buildPageInsightContextPrompt(createInsight());
 
   assert.match(prompt, /Background page analysis update only/i);
+  assert.match(prompt, /supplemental context/i);
+  assert.match(prompt, /trust the screen/i);
   assert.match(prompt, /Pricing - BrowserBud/);
   assert.match(prompt, /Compare plans/);
   assert.match(prompt, /Navigation help/i);

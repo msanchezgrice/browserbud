@@ -51,6 +51,7 @@ const STORAGE_KEYS = {
   activityLog: 'browserbud.activityLog',
   savedNotes: 'browserbud.savedNotes',
   transcriptLogs: 'browserbud.transcriptLogs',
+  modelInputPreview: 'browserbud.modelInputPreview',
 };
 
 const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
@@ -64,6 +65,38 @@ const readStoredText = (key: string) => {
     return localStorage.getItem(key) || '';
   } catch {
     return '';
+  }
+};
+
+const readStoredModelInputPreview = (): ModelInputPreview => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.modelInputPreview);
+    if (!raw) {
+      return {
+        lastScreenFrameAt: null,
+        lastBrowserContextPrompt: '',
+        lastBrowserContextCapturedAt: null,
+        lastPageInsightPrompt: '',
+        lastPageInsightGeneratedAt: null,
+      };
+    }
+
+    const parsed = JSON.parse(raw) as Partial<ModelInputPreview>;
+    return {
+      lastScreenFrameAt: typeof parsed.lastScreenFrameAt === 'string' ? parsed.lastScreenFrameAt : null,
+      lastBrowserContextPrompt: typeof parsed.lastBrowserContextPrompt === 'string' ? parsed.lastBrowserContextPrompt : '',
+      lastBrowserContextCapturedAt: typeof parsed.lastBrowserContextCapturedAt === 'string' ? parsed.lastBrowserContextCapturedAt : null,
+      lastPageInsightPrompt: typeof parsed.lastPageInsightPrompt === 'string' ? parsed.lastPageInsightPrompt : '',
+      lastPageInsightGeneratedAt: typeof parsed.lastPageInsightGeneratedAt === 'string' ? parsed.lastPageInsightGeneratedAt : null,
+    };
+  } catch {
+    return {
+      lastScreenFrameAt: null,
+      lastBrowserContextPrompt: '',
+      lastBrowserContextCapturedAt: null,
+      lastPageInsightPrompt: '',
+      lastPageInsightGeneratedAt: null,
+    };
   }
 };
 
@@ -145,6 +178,13 @@ const CAPTURE_MODES: Array<{
 
 type AppTab = AppTabRoute;
 type PageInsightStatus = 'idle' | 'warming' | 'ready' | 'error';
+type ModelInputPreview = {
+  lastScreenFrameAt: string | null;
+  lastBrowserContextPrompt: string;
+  lastBrowserContextCapturedAt: string | null;
+  lastPageInsightPrompt: string;
+  lastPageInsightGeneratedAt: string | null;
+};
 
 type LogEntry = {
   id: string;
@@ -373,6 +413,8 @@ export default function App() {
   const [pageInsight, setPageInsight] = useState<PageInsight | null>(null);
   const [pageInsightStatus, setPageInsightStatus] = useState<PageInsightStatus>('idle');
   const [pageInsightError, setPageInsightError] = useState<string | null>(null);
+  const [modelInputPreview, setModelInputPreview] = useState<ModelInputPreview>(() => readStoredModelInputPreview());
+  const [lastScreenFramePreview, setLastScreenFramePreview] = useState<string | null>(null);
   const [newPersonaName, setNewPersonaName] = useState('');
   const [newPersonaPrompt, setNewPersonaPrompt] = useState('');
   const [newPersonaVoice, setNewPersonaVoice] = useState(AVAILABLE_VOICES[0]);
@@ -560,6 +602,11 @@ export default function App() {
     }
 
     lastInjectedBrowserContextPromptRef.current = contextPrompt;
+    setModelInputPreview((prev) => ({
+      ...prev,
+      lastBrowserContextPrompt: contextPrompt,
+      lastBrowserContextCapturedAt: browserContextPacket.capturedAt,
+    }));
     sendSessionPrompt(contextPrompt, { suppressOutput: true });
   }, [browserContextPacket, isRunning]);
 
@@ -665,7 +712,13 @@ export default function App() {
     }
 
     lastInjectedPageInsightFingerprintRef.current = pageInsight.documentFingerprint;
-    sendSessionPrompt(buildPageInsightContextPrompt(pageInsight), { suppressOutput: true });
+    const insightPrompt = buildPageInsightContextPrompt(pageInsight);
+    setModelInputPreview((prev) => ({
+      ...prev,
+      lastPageInsightPrompt: insightPrompt,
+      lastPageInsightGeneratedAt: pageInsight.generatedAt,
+    }));
+    sendSessionPrompt(insightPrompt, { suppressOutput: true });
   }, [isRunning, pageInsight]);
 
   useEffect(() => {
@@ -739,6 +792,10 @@ export default function App() {
       role: log.role,
     }))));
   }, [logs]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.modelInputPreview, JSON.stringify(modelInputPreview));
+  }, [modelInputPreview]);
 
   useEffect(() => {
     let cancelled = false;
@@ -879,6 +936,15 @@ export default function App() {
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     const dataUrl = canvas.toDataURL('image/jpeg', 0.5);
     return dataUrl.split(',')[1];
+  };
+
+  const recordSentScreenFrame = (base64Image: string) => {
+    const timestamp = new Date().toISOString();
+    setModelInputPreview((prev) => ({
+      ...prev,
+      lastScreenFrameAt: timestamp,
+    }));
+    setLastScreenFramePreview(`data:image/jpeg;base64,${base64Image}`);
   };
 
   const playAudioChunk = (base64Audio: string) => {
@@ -2023,8 +2089,9 @@ Tool rules:
 - The Saved Notes tab stores direct reminders, todos, and remember-this requests. If the user says add a note, save this, or remember this, you must call saveNote in this turn before you finish responding.
 - Do not use tools on every turn.
 - Prioritize clean, complete spoken responses over fragmented quick replies.
-${screenContextEnabled ? '- You receive live screen imagery from the current shared screen or tab. Use it as visual truth for what is actually visible.' : ''}
+${screenContextEnabled ? '- You receive live screen imagery from the current shared screen or tab. Treat that imagery as the primary source of truth for what is visibly on screen right now.' : ''}
 ${browserContextEnabled ? '- You also receive browser-native page context updates including URL, title, page structure, navigation, visible action anchors, and a current-page document corpus.' : ''}
+${browserContextEnabled ? '- Treat browser-native context and prepared page analysis as supplemental. They help with structure, navigation, URL awareness, and off-screen document understanding, but they should not override the latest visible screen state.' : ''}
 ${browserContextEnabled ? '- When the user asks about off-screen content, page content below the fold, long articles, docs, or PDFs, use inspectCurrentPage, readCurrentPageChunk, and searchCurrentPage before answering. Do not pretend you have the full document if you have not inspected it.' : ''}` }]
         },
         speechConfig: {
@@ -2181,10 +2248,11 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
               }).catch(() => {});
             };
 
-            if (captureRequirements.requiresScreenShare) {
+                if (captureRequirements.requiresScreenShare) {
               videoIntervalRef.current = window.setInterval(() => {
                 const base64Image = captureFrame();
                 if (base64Image) {
+                  recordSentScreenFrame(base64Image);
                   sessionPromise.then((session) => {
                     session.sendRealtimeInput({ video: { data: base64Image, mimeType: 'image/jpeg' } });
                   }).catch(() => {});
@@ -3273,6 +3341,72 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
 	                            >
 	                              {showApiKey ? 'Hide key' : 'Show key'}
 	                            </button>
+	                          </div>
+	                        </div>
+
+	                        <div className="mt-4 rounded-2xl border border-stone-200 bg-stone-50 p-4">
+	                          <div className="flex items-start justify-between gap-3">
+	                            <div>
+	                              <div className="text-xs font-medium uppercase tracking-[0.14em] text-stone-400">
+	                                Model Input Preview
+	                              </div>
+	                              <p className="mt-1 text-sm leading-6 text-stone-500">
+	                                Screen frames are primary for current visible state. Browser context and prepared page analysis are supplemental.
+	                              </p>
+	                            </div>
+	                          </div>
+
+	                          <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
+	                            <div className="rounded-xl border border-stone-200 bg-white px-3 py-2">
+	                              <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Last Screen Frame</div>
+	                              <div className="mt-1 text-sm font-medium text-stone-700">
+	                                {modelInputPreview.lastScreenFrameAt
+	                                  ? new Date(modelInputPreview.lastScreenFrameAt).toLocaleTimeString()
+	                                  : 'None yet'}
+	                              </div>
+	                            </div>
+	                            <div className="rounded-xl border border-stone-200 bg-white px-3 py-2">
+	                              <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Browser Context</div>
+	                              <div className="mt-1 text-sm font-medium text-stone-700">
+	                                {modelInputPreview.lastBrowserContextCapturedAt
+	                                  ? new Date(modelInputPreview.lastBrowserContextCapturedAt).toLocaleTimeString()
+	                                  : 'None yet'}
+	                              </div>
+	                            </div>
+	                            <div className="rounded-xl border border-stone-200 bg-white px-3 py-2">
+	                              <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Prepared Analysis</div>
+	                              <div className="mt-1 text-sm font-medium text-stone-700">
+	                                {modelInputPreview.lastPageInsightGeneratedAt
+	                                  ? new Date(modelInputPreview.lastPageInsightGeneratedAt).toLocaleTimeString()
+	                                  : 'None yet'}
+	                              </div>
+	                            </div>
+	                          </div>
+
+	                          {lastScreenFramePreview && (
+	                            <div className="mt-4">
+	                              <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Latest Screen Frame</div>
+	                              <img
+	                                src={lastScreenFramePreview}
+	                                alt="Latest screen frame sent to the live model"
+	                                className="mt-2 h-28 w-full rounded-xl border border-stone-200 object-cover"
+	                              />
+	                            </div>
+	                          )}
+
+	                          <div className="mt-4 space-y-3">
+	                            <div>
+	                              <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Latest Browser Context Prompt</div>
+	                              <div className="mt-2 max-h-40 overflow-y-auto rounded-xl border border-stone-200 bg-white px-3 py-3 text-[11px] leading-5 text-stone-600 whitespace-pre-wrap">
+	                                {modelInputPreview.lastBrowserContextPrompt || 'No browser-context prompt has been injected yet.'}
+	                              </div>
+	                            </div>
+	                            <div>
+	                              <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Latest Prepared Analysis Prompt</div>
+	                              <div className="mt-2 max-h-40 overflow-y-auto rounded-xl border border-stone-200 bg-white px-3 py-3 text-[11px] leading-5 text-stone-600 whitespace-pre-wrap">
+	                                {modelInputPreview.lastPageInsightPrompt || 'No prepared page-analysis prompt has been injected yet.'}
+	                              </div>
+	                            </div>
 	                          </div>
 	                        </div>
 	                      </motion.div>

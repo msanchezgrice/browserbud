@@ -138,6 +138,8 @@ export function upsertStoredPageInsight(
 export function buildPageInsightContextPrompt(insight: PageInsight): string {
   const lines = [
     'Background page analysis update only. Do not respond aloud to this message.',
+    'Treat this prepared analysis as supplemental context for off-screen understanding, navigation help, and document recall.',
+    'If this analysis conflicts with the latest live screen imagery, trust the screen for what is visibly on screen now.',
     `Prepared page summary for: ${insight.title}`,
     `Summary: ${normalizeText(insight.summary)}`,
   ];
