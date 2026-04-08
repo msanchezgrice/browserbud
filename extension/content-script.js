@@ -6,6 +6,8 @@ const APP_ORIGINS = new Set([
 
 const MAX_DOCUMENT_TEXT_CHARS = 240000;
 const OVERLAY_ELEMENT_ID = 'browserbud-live-helpful-overlay';
+const HIGHLIGHT_RING_ELEMENT_ID = 'browserbud-live-highlight-ring';
+const HIGHLIGHT_STYLE_ELEMENT_ID = 'browserbud-live-highlight-style';
 
 const isBrowserBudPage = APP_ORIGINS.has(window.location.origin);
 
@@ -69,6 +71,32 @@ function selectorHintsFor(element) {
   }
 
   return [...new Set(hints)].slice(0, 4);
+}
+
+function elementRole(element) {
+  return cleanText(element.getAttribute('role')) || element.tagName.toLowerCase();
+}
+
+function elementName(element) {
+  if (!(element instanceof Element)) {
+    return '';
+  }
+
+  return limitText(
+    element.getAttribute('aria-label')
+      || element.getAttribute('value')
+      || element.getAttribute('placeholder')
+      || element.textContent
+      || '',
+    120,
+  );
+}
+
+function elementNearbyHeading(element) {
+  return limitText(
+    element.closest('section, article, main, form, nav')?.querySelector('h1, h2, h3')?.textContent || '',
+    100,
+  );
 }
 
 function readHeadings() {
@@ -293,6 +321,174 @@ function removeHelpfulOverlay() {
   document.getElementById(OVERLAY_ELEMENT_ID)?.remove();
 }
 
+function ensureHighlightStyles() {
+  if (document.getElementById(HIGHLIGHT_STYLE_ELEMENT_ID)) {
+    return;
+  }
+
+  const style = document.createElement('style');
+  style.id = HIGHLIGHT_STYLE_ELEMENT_ID;
+  style.textContent = `
+    @keyframes browserbud-highlight-pulse {
+      0% { transform: scale(0.98); opacity: 0.72; }
+      50% { transform: scale(1.01); opacity: 1; }
+      100% { transform: scale(0.99); opacity: 0.8; }
+    }
+  `;
+  document.documentElement.appendChild(style);
+}
+
+function removeHighlightRing() {
+  document.getElementById(HIGHLIGHT_RING_ELEMENT_ID)?.remove();
+}
+
+function renderHighlightRing(element) {
+  if (!(element instanceof Element)) {
+    return;
+  }
+
+  ensureHighlightStyles();
+  removeHighlightRing();
+
+  const rect = element.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return;
+  }
+
+  const ring = document.createElement('div');
+  ring.id = HIGHLIGHT_RING_ELEMENT_ID;
+  Object.assign(ring.style, {
+    position: 'fixed',
+    left: `${Math.max(rect.left - 8, 0)}px`,
+    top: `${Math.max(rect.top - 8, 0)}px`,
+    width: `${Math.min(rect.width + 16, window.innerWidth)}px`,
+    height: `${Math.min(rect.height + 16, window.innerHeight)}px`,
+    zIndex: '2147483647',
+    pointerEvents: 'none',
+    borderRadius: '18px',
+    border: '3px solid rgba(20, 184, 166, 0.95)',
+    boxShadow: '0 0 0 9999px rgba(15, 23, 42, 0.18), 0 0 0 8px rgba(20, 184, 166, 0.18)',
+    background: 'rgba(45, 212, 191, 0.08)',
+    animation: 'browserbud-highlight-pulse 1s ease-in-out infinite',
+  });
+
+  document.documentElement.appendChild(ring);
+  window.setTimeout(() => {
+    if (ring.parentNode) {
+      ring.remove();
+    }
+  }, 4200);
+}
+
+function resolveSelectorHint(hint) {
+  if (!hint || hint.startsWith('text=')) {
+    return null;
+  }
+
+  try {
+    const candidate = document.querySelector(hint);
+    return candidate instanceof Element ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function scoreHighlightCandidate(element, request) {
+  const role = elementRole(element).toLowerCase();
+  const name = elementName(element).toLowerCase();
+  const nearbyHeading = elementNearbyHeading(element).toLowerCase();
+
+  let score = 0;
+  if (request.anchorId && element.id && element.id === request.anchorId) {
+    score += 80;
+  }
+
+  if (request.role && role === cleanText(request.role).toLowerCase()) {
+    score += 18;
+  }
+
+  if (request.name) {
+    const normalizedName = cleanText(request.name).toLowerCase();
+    if (name === normalizedName) {
+      score += 40;
+    } else if (name.includes(normalizedName) || normalizedName.includes(name)) {
+      score += 18;
+    }
+  }
+
+  if (request.nearbyHeading) {
+    const normalizedHeading = cleanText(request.nearbyHeading).toLowerCase();
+    if (nearbyHeading === normalizedHeading) {
+      score += 16;
+    } else if (nearbyHeading.includes(normalizedHeading) || normalizedHeading.includes(nearbyHeading)) {
+      score += 8;
+    }
+  }
+
+  if (isVisible(element)) {
+    score += 6;
+  }
+
+  if (!(element instanceof HTMLButtonElement) || !element.disabled) {
+    score += 2;
+  }
+
+  return score;
+}
+
+function findHighlightTarget(request) {
+  const selectorCandidates = (Array.isArray(request.selectorHints) ? request.selectorHints : [])
+    .map(resolveSelectorHint)
+    .filter(Boolean);
+
+  if (selectorCandidates.length > 0) {
+    return selectorCandidates[0];
+  }
+
+  const candidates = [...document.querySelectorAll('a[href], button, [role="button"], input, textarea, select, [tabindex]')]
+    .filter((element) => element instanceof Element)
+    .filter(isVisible);
+
+  const ranked = candidates
+    .map((element) => ({
+      element,
+      score: scoreHighlightCandidate(element, request),
+    }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  return ranked[0]?.element || null;
+}
+
+function handleHighlightRequest(message) {
+  const target = findHighlightTarget(message);
+  if (!target) {
+    return {
+      requestId: typeof message.requestId === 'string' ? message.requestId : 'unknown',
+      ok: false,
+      url: window.location.href,
+      error: 'No matching visible element was found on this page.',
+    };
+  }
+
+  if (message.scrollIntoView !== false) {
+    target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+  }
+
+  window.setTimeout(() => {
+    renderHighlightRing(target);
+  }, message.scrollIntoView === false ? 20 : 260);
+
+  return {
+    requestId: typeof message.requestId === 'string' ? message.requestId : 'unknown',
+    ok: true,
+    url: window.location.href,
+    anchorId: target.id || null,
+    matchedName: elementName(target) || null,
+    matchedRole: elementRole(target) || null,
+  };
+}
+
 function ensureHelpfulOverlay() {
   let element = document.getElementById(OVERLAY_ELEMENT_ID);
   if (element) {
@@ -401,6 +597,31 @@ if (isBrowserBudPage) {
         url: typeof message.payload?.url === 'string' ? message.payload.url : '',
         visible: message.payload?.visible !== false,
       }, () => {});
+      return;
+    }
+
+    if (message.type === 'BROWSERBUD_HIGHLIGHT_PAGE_ELEMENT') {
+      chrome.runtime.sendMessage({
+        type: 'BROWSERBUD_HIGHLIGHT_TARGET',
+        requestId: message.payload?.requestId,
+        anchorId: typeof message.payload?.anchorId === 'string' ? message.payload.anchorId : '',
+        name: typeof message.payload?.name === 'string' ? message.payload.name : '',
+        role: typeof message.payload?.role === 'string' ? message.payload.role : '',
+        nearbyHeading: typeof message.payload?.nearbyHeading === 'string' ? message.payload.nearbyHeading : '',
+        selectorHints: Array.isArray(message.payload?.selectorHints) ? message.payload.selectorHints : [],
+        scrollIntoView: message.payload?.scrollIntoView !== false,
+      }, (response) => {
+        postToBrowserBudPage({
+          source: 'browserbud-extension',
+          type: 'BROWSERBUD_HIGHLIGHT_RESPONSE',
+          payload: response || {
+            requestId: typeof message.payload?.requestId === 'string' ? message.payload.requestId : 'unknown',
+            ok: false,
+            url: window.location.href,
+            error: 'Extension highlight failed.',
+          },
+        });
+      });
     }
   });
 }
@@ -437,6 +658,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'BROWSERBUD_OVERLAY_CLEAR') {
     removeHelpfulOverlay();
     sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === 'BROWSERBUD_HIGHLIGHT_TARGET') {
+    sendResponse(handleHighlightRequest(message));
     return false;
   }
 

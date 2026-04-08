@@ -4,7 +4,8 @@ export type BrowserBudBridgeRequestType =
   | 'REQUEST_ACTIVE_CONTEXT'
   | 'REQUEST_EXTENSION_STATUS'
   | 'REQUEST_PAGE_RESOURCE'
-  | 'SET_HELPFUL_OVERLAY';
+  | 'SET_HELPFUL_OVERLAY'
+  | 'HIGHLIGHT_PAGE_ELEMENT';
 
 type BrowserBudBridgeRequest = {
   source: 'browserbud-app';
@@ -15,6 +16,12 @@ type BrowserBudBridgeRequest = {
     text?: string;
     title?: string;
     visible?: boolean;
+    anchorId?: string;
+    name?: string;
+    role?: string;
+    nearbyHeading?: string;
+    selectorHints?: string[];
+    scrollIntoView?: boolean;
   };
 };
 
@@ -50,10 +57,27 @@ type BrowserBudBridgeResourceMessage = {
   payload: BrowserBudPageResourceResponse;
 };
 
+export type BrowserBudHighlightResponse = {
+  requestId: string;
+  ok: boolean;
+  url: string;
+  anchorId?: string | null;
+  matchedName?: string | null;
+  matchedRole?: string | null;
+  error?: string | null;
+};
+
+type BrowserBudBridgeHighlightMessage = {
+  source: 'browserbud-extension';
+  type: 'BROWSERBUD_HIGHLIGHT_RESPONSE';
+  payload: BrowserBudHighlightResponse;
+};
+
 export type BrowserBudBridgeEvent =
   | { kind: 'ready'; version: string }
   | { kind: 'packet'; packet: BrowserContextPacket }
-  | { kind: 'resource'; response: BrowserBudPageResourceResponse };
+  | { kind: 'resource'; response: BrowserBudPageResourceResponse }
+  | { kind: 'highlight'; response: BrowserBudHighlightResponse };
 
 export function createBrowserBudBridgeRequest(
   type: BrowserBudBridgeRequestType,
@@ -116,6 +140,29 @@ export function parseBrowserBudBridgeMessage(value: unknown): BrowserBudBridgeEv
           dataBase64: typeof payload.dataBase64 === 'string' ? payload.dataBase64 : null,
           byteLength: typeof payload.byteLength === 'number' ? payload.byteLength : null,
           truncated: Boolean(payload.truncated),
+          error: typeof payload.error === 'string' ? payload.error : null,
+        },
+      };
+    }
+  }
+
+  if (message.type === 'BROWSERBUD_HIGHLIGHT_RESPONSE') {
+    const payload = message.payload as BrowserBudBridgeHighlightMessage['payload'];
+    if (
+      payload
+      && typeof payload.requestId === 'string'
+      && typeof payload.ok === 'boolean'
+      && typeof payload.url === 'string'
+    ) {
+      return {
+        kind: 'highlight',
+        response: {
+          requestId: payload.requestId,
+          ok: payload.ok,
+          url: payload.url,
+          anchorId: typeof payload.anchorId === 'string' ? payload.anchorId : null,
+          matchedName: typeof payload.matchedName === 'string' ? payload.matchedName : null,
+          matchedRole: typeof payload.matchedRole === 'string' ? payload.matchedRole : null,
           error: typeof payload.error === 'string' ? payload.error : null,
         },
       };
@@ -190,6 +237,54 @@ export function requestBrowserBudPageResource(
       createBrowserBudBridgeRequest('REQUEST_PAGE_RESOURCE', {
         requestId,
         url,
+      }),
+      window.location.origin,
+    );
+  });
+}
+
+export function requestBrowserBudElementHighlight(
+  payload: {
+    anchorId?: string;
+    name?: string;
+    role?: string;
+    nearbyHeading?: string;
+    selectorHints?: string[];
+    scrollIntoView?: boolean;
+  },
+  timeoutMs = 8000,
+): Promise<BrowserBudHighlightResponse | null> {
+  if (typeof window === 'undefined') {
+    return Promise.resolve(null);
+  }
+
+  const requestId = `highlight-${Math.random().toString(36).slice(2)}`;
+
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, timeoutMs);
+
+    const cleanup = subscribeToBrowserBudBridge((event) => {
+      if (event.kind !== 'highlight' || event.response.requestId !== requestId) {
+        return;
+      }
+
+      window.clearTimeout(timeout);
+      cleanup();
+      resolve(event.response);
+    });
+
+    window.postMessage(
+      createBrowserBudBridgeRequest('HIGHLIGHT_PAGE_ELEMENT', {
+        requestId,
+        anchorId: payload.anchorId,
+        name: payload.name,
+        role: payload.role,
+        nearbyHeading: payload.nearbyHeading,
+        selectorHints: payload.selectorHints,
+        scrollIntoView: payload.scrollIntoView !== false,
       }),
       window.location.origin,
     );

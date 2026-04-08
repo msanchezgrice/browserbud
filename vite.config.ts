@@ -32,6 +32,7 @@ export default defineConfig(({mode}) => {
       'process.env.GEMINI_LIVE_MODEL': JSON.stringify(env.GEMINI_LIVE_MODEL),
       'process.env.BROWSERBUD_LOCAL_API_URL': JSON.stringify(env.BROWSERBUD_LOCAL_API_URL),
       'process.env.BROWSERBUD_DEV_DEFAULT_API_KEY': JSON.stringify(mode === 'development' ? env.GEMINI_API_KEY || '' : ''),
+      'process.env.BROWSERBUD_ENABLE_ELEMENT_HIGHLIGHT': JSON.stringify(env.BROWSERBUD_ENABLE_ELEMENT_HIGHLIGHT || ''),
     },
     resolve: {
       alias: {

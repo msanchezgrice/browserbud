@@ -9,6 +9,7 @@ const MAX_BINARY_RESPONSE_BYTES = 15 * 1024 * 1024;
 const MAX_OVERLAY_TEXT_CHARS = 900;
 
 let latestContextPacket = null;
+let latestExternalContextPacket = null;
 let latestHelpfulOverlay = null;
 
 function isHttpUrl(url) {
@@ -127,6 +128,13 @@ async function collectPageContextFromTab(tabId, navEvent) {
   return response.packet;
 }
 
+function rememberContextPacket(packet) {
+  latestContextPacket = packet;
+  if (packet && !isBrowserBudUrl(packet.url)) {
+    latestExternalContextPacket = packet;
+  }
+}
+
 function normalizeOverlayText(value) {
   return (value || '').replace(/\s+/g, ' ').trim().slice(0, MAX_OVERLAY_TEXT_CHARS);
 }
@@ -155,6 +163,22 @@ async function applyHelpfulOverlayToTab(tabId) {
   });
 }
 
+async function getPreferredExternalTab() {
+  if (typeof latestExternalContextPacket?.tabId === 'number') {
+    const tab = await chrome.tabs.get(latestExternalContextPacket.tabId).catch(() => null);
+    if (tab?.id && isHttpUrl(tab.url) && !isBrowserBudUrl(tab.url)) {
+      return tab;
+    }
+  }
+
+  const activeTab = await getActiveHttpTab();
+  if (activeTab?.id && !isBrowserBudUrl(activeTab.url)) {
+    return activeTab;
+  }
+
+  return null;
+}
+
 async function broadcastPacket(packet) {
   const tabs = await chrome.tabs.query({});
   await Promise.all(tabs
@@ -177,6 +201,18 @@ async function getActiveHttpTab() {
 async function requestAndBroadcastActiveContext(navEvent = 'content_snapshot') {
   const activeTab = await getActiveHttpTab();
   if (!activeTab || typeof activeTab.id !== 'number') {
+    if (latestExternalContextPacket) {
+      await broadcastPacket(latestExternalContextPacket);
+      return latestExternalContextPacket;
+    }
+    return null;
+  }
+
+  if (isBrowserBudUrl(activeTab.url)) {
+    if (latestExternalContextPacket) {
+      await broadcastPacket(latestExternalContextPacket);
+      return latestExternalContextPacket;
+    }
     return null;
   }
 
@@ -185,7 +221,7 @@ async function requestAndBroadcastActiveContext(navEvent = 'content_snapshot') {
     return null;
   }
 
-  latestContextPacket = packet;
+  rememberContextPacket(packet);
   await broadcastPacket(packet);
   await applyHelpfulOverlayToTab(activeTab.id);
   return packet;
@@ -197,9 +233,17 @@ function queueContextCollection(tabId, navEvent, delayMs = 150) {
   }
 
   globalThis.setTimeout(async () => {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab?.id || !isHttpUrl(tab.url) || isBrowserBudUrl(tab.url)) {
+      if (latestExternalContextPacket) {
+        await broadcastPacket(latestExternalContextPacket);
+      }
+      return;
+    }
+
     const packet = await collectPageContextFromTab(tabId, navEvent);
     if (packet) {
-      latestContextPacket = packet;
+      rememberContextPacket(packet);
       await broadcastPacket(packet);
       await applyHelpfulOverlayToTab(tabId);
     }
@@ -247,8 +291,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         updatedAt: new Date().toISOString(),
       };
 
-    const targetTabId = typeof latestContextPacket?.tabId === 'number'
-      ? latestContextPacket.tabId
+    const targetTabId = typeof latestExternalContextPacket?.tabId === 'number'
+      ? latestExternalContextPacket.tabId
       : null;
 
     if (targetTabId) {
@@ -258,7 +302,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    getActiveHttpTab().then((tab) => {
+    getPreferredExternalTab().then((tab) => {
       if (tab?.id) {
         return applyHelpfulOverlayToTab(tab.id);
       }
@@ -269,8 +313,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === 'BROWSERBUD_HIGHLIGHT_TARGET') {
+    getPreferredExternalTab().then(async (tab) => {
+      if (!tab?.id) {
+        sendResponse({
+          requestId: typeof message.requestId === 'string' ? message.requestId : 'unknown',
+          ok: false,
+          url: '',
+          error: 'No active browsing tab is available to highlight.',
+        });
+        return;
+      }
+
+      const response = await sendMessageToTab(tab.id, {
+        type: 'BROWSERBUD_HIGHLIGHT_TARGET',
+        requestId: message.requestId,
+        anchorId: message.anchorId,
+        name: message.name,
+        role: message.role,
+        nearbyHeading: message.nearbyHeading,
+        selectorHints: Array.isArray(message.selectorHints) ? message.selectorHints : [],
+        scrollIntoView: message.scrollIntoView !== false,
+      });
+
+      sendResponse(response || {
+        requestId: typeof message.requestId === 'string' ? message.requestId : 'unknown',
+        ok: false,
+        url: typeof tab.url === 'string' ? tab.url : '',
+        error: 'Highlight request did not return a result.',
+      });
+    });
+    return true;
+  }
+
   if (message?.type === 'BROWSERBUD_CONTEXT_FROM_TAB' && message.packet) {
-    latestContextPacket = message.packet;
+    rememberContextPacket(message.packet);
     broadcastPacket(message.packet).then(() => {
       sendResponse({ ok: true });
     });

@@ -78,6 +78,26 @@ test('createBrowserBudBridgeRequest builds an app-to-extension request envelope'
       visible: true,
     },
   });
+
+  assert.deepEqual(createBrowserBudBridgeRequest('HIGHLIGHT_PAGE_ELEMENT', {
+    requestId: 'highlight-1',
+    name: 'Start free trial',
+    role: 'button',
+    nearbyHeading: 'Pricing',
+    selectorHints: ['button[data-cta="trial"]'],
+    scrollIntoView: true,
+  }), {
+    source: 'browserbud-app',
+    type: 'BROWSERBUD_HIGHLIGHT_PAGE_ELEMENT',
+    payload: {
+      requestId: 'highlight-1',
+      name: 'Start free trial',
+      role: 'button',
+      nearbyHeading: 'Pricing',
+      selectorHints: ['button[data-cta="trial"]'],
+      scrollIntoView: true,
+    },
+  });
 });
 
 test('parseBrowserBudBridgeMessage recognizes extension ready and context packets', () => {

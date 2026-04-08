@@ -19,7 +19,7 @@ import {
   type BrowserContextPacket,
   type CaptureMode,
 } from './browserContext';
-import { postBrowserBudBridgeRequest, subscribeToBrowserBudBridge } from './browserContextBridge';
+import { postBrowserBudBridgeRequest, requestBrowserBudElementHighlight, subscribeToBrowserBudBridge } from './browserContextBridge';
 import { createStoredApiKeyController } from './clientConfig';
 import {
   buildCurrentPageToolResult,
@@ -44,6 +44,7 @@ const DEV_DEFAULT_API_KEY = process.env.BROWSERBUD_DEV_DEFAULT_API_KEY || '';
 const TIMED_HELPFUL_INFO_MODEL = 'gemini-2.5-flash';
 const PAGE_INSIGHT_MODEL = 'gemini-2.5-flash';
 const PAGE_INSIGHT_CHUNK_SIZE = 12000;
+const ELEMENT_HIGHLIGHTING_DEFAULT_ENABLED = process.env.BROWSERBUD_ENABLE_ELEMENT_HIGHLIGHT === 'true';
 
 const STORAGE_KEYS = {
   customPersonas: 'browserbud.customPersonas',
@@ -52,6 +53,7 @@ const STORAGE_KEYS = {
   savedNotes: 'browserbud.savedNotes',
   transcriptLogs: 'browserbud.transcriptLogs',
   modelInputPreview: 'browserbud.modelInputPreview',
+  elementHighlightingEnabled: 'browserbud.flags.elementHighlightingEnabled',
 };
 
 const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
@@ -66,6 +68,18 @@ const readStoredText = (key: string) => {
     return localStorage.getItem(key) || '';
   } catch {
     return '';
+  }
+};
+
+const readStoredBoolean = (key: string, fallbackValue = false): boolean => {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw == null) {
+      return fallbackValue;
+    }
+    return raw === 'true';
+  } catch {
+    return fallbackValue;
   }
 };
 
@@ -530,6 +544,9 @@ export default function App() {
   const [pageInsight, setPageInsight] = useState<PageInsight | null>(null);
   const [pageInsightStatus, setPageInsightStatus] = useState<PageInsightStatus>('idle');
   const [pageInsightError, setPageInsightError] = useState<string | null>(null);
+  const [elementHighlightingEnabled, setElementHighlightingEnabled] = useState<boolean>(() => (
+    readStoredBoolean(STORAGE_KEYS.elementHighlightingEnabled, ELEMENT_HIGHLIGHTING_DEFAULT_ENABLED)
+  ));
   const [modelInputPreview, setModelInputPreview] = useState<ModelInputPreview>(() => readStoredModelInputPreview());
   const [lastScreenFramePreview, setLastScreenFramePreview] = useState<string | null>(null);
   const [newPersonaName, setNewPersonaName] = useState('');
@@ -602,6 +619,8 @@ export default function App() {
   const lastHelpfulOverlaySignatureRef = useRef<string | null>(null);
   const immediateScreenFrameTimerRef = useRef<number | null>(null);
   const lastImmediateScreenFrameNavKeyRef = useRef<string | null>(null);
+  const queuedBrowserContextInjectionRef = useRef<{ packet: BrowserContextPacket; prompt: string } | null>(null);
+  const queuedPageInsightInjectionRef = useRef<PageInsight | null>(null);
   
   // Interval Refs
   const videoIntervalRef = useRef<number | null>(null);
@@ -636,6 +655,12 @@ export default function App() {
   }, [userApiKey]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.elementHighlightingEnabled, elementHighlightingEnabled ? 'true' : 'false');
+    } catch {}
+  }, [elementHighlightingEnabled]);
+
+  useEffect(() => {
     latestBrowserContextRef.current = browserContextPacket;
   }, [browserContextPacket]);
 
@@ -657,6 +682,10 @@ export default function App() {
       }
 
       if (event.kind === 'resource') {
+        return;
+      }
+
+      if (event.kind === 'highlight') {
         return;
       }
 
@@ -741,28 +770,15 @@ export default function App() {
       return;
     }
 
-    lastInjectedBrowserContextPromptRef.current = contextPrompt;
-    setModelInputPreview((prev) => ({
-      ...prev,
-      lastBrowserContextPrompt: contextPrompt,
-      lastBrowserContextCapturedAt: browserContextPacket.capturedAt,
-    }));
-    recordAnalyticsEventSafe({
-      source: 'browserbud-ui',
-      eventType: 'input.browser_context_injected',
-      appName: 'Chrome',
-      pageTitle: browserContextPacket.title,
-      url: browserContextPacket.url,
-      domain: browserContextPacket.domain,
-      payload: {
+    if (isModelSpeakingRef.current) {
+      queuedBrowserContextInjectionRef.current = {
+        packet: browserContextPacket,
         prompt: contextPrompt,
-        activeSection: browserContextPacket.location.activeSection || null,
-        description: browserContextPacket.page.metaDescription || browserContextPacket.page.mainTextExcerpt || null,
-        primaryLinks: browserContextPacket.navMap.primaryLinks.slice(0, 6),
-        breadcrumbs: browserContextPacket.navMap.breadcrumbs.slice(0, 6),
-      },
-    });
-    sendSessionPrompt(contextPrompt, { suppressOutput: true });
+      };
+      return;
+    }
+
+    injectBrowserContextPrompt(browserContextPacket, contextPrompt);
   }, [browserContextPacket, isRunning, captureRequirements.requiresScreenShare, isSharing]);
 
   useEffect(() => {
@@ -866,31 +882,12 @@ export default function App() {
       return;
     }
 
-    lastInjectedPageInsightFingerprintRef.current = pageInsight.documentFingerprint;
-    const insightPrompt = buildPageInsightContextPrompt(pageInsight);
-    setModelInputPreview((prev) => ({
-      ...prev,
-      lastPageInsightPrompt: insightPrompt,
-      lastPageInsightGeneratedAt: pageInsight.generatedAt,
-    }));
-    recordAnalyticsEventSafe({
-      source: 'browserbud-ui',
-      eventType: 'input.page_insight_injected',
-      appName: 'Chrome',
-      pageTitle: pageInsight.title,
-      url: pageInsight.url,
-      domain: buildPageContextDetails(latestBrowserContextRef.current).domain,
-      payload: {
-        prompt: insightPrompt,
-        summary: pageInsight.summary,
-        keyPoints: pageInsight.keyPoints,
-        likelyUserGoals: pageInsight.likelyUserGoals,
-        navigationTips: pageInsight.navigationTips,
-        pageKind: pageInsight.pageKind,
-        documentTextLength: pageInsight.documentTextLength,
-      },
-    });
-    sendSessionPrompt(insightPrompt, { suppressOutput: true });
+    if (isModelSpeakingRef.current) {
+      queuedPageInsightInjectionRef.current = pageInsight;
+      return;
+    }
+
+    injectPageInsightPrompt(pageInsight);
   }, [isRunning, pageInsight]);
 
   useEffect(() => {
@@ -1797,6 +1794,78 @@ export default function App() {
     });
   };
 
+  const injectBrowserContextPrompt = (packet: BrowserContextPacket, contextPrompt: string) => {
+    lastInjectedBrowserContextPromptRef.current = contextPrompt;
+    setModelInputPreview((prev) => ({
+      ...prev,
+      lastBrowserContextPrompt: contextPrompt,
+      lastBrowserContextCapturedAt: packet.capturedAt,
+    }));
+    recordAnalyticsEventSafe({
+      source: 'browserbud-ui',
+      eventType: 'input.browser_context_injected',
+      appName: 'Chrome',
+      pageTitle: packet.title,
+      url: packet.url,
+      domain: packet.domain,
+      payload: {
+        prompt: contextPrompt,
+        activeSection: packet.location.activeSection || null,
+        description: packet.page.metaDescription || packet.page.mainTextExcerpt || null,
+        primaryLinks: packet.navMap.primaryLinks.slice(0, 6),
+        breadcrumbs: packet.navMap.breadcrumbs.slice(0, 6),
+      },
+    });
+    sendSessionPrompt(contextPrompt, { suppressOutput: true });
+  };
+
+  const injectPageInsightPrompt = (insight: PageInsight) => {
+    lastInjectedPageInsightFingerprintRef.current = insight.documentFingerprint;
+    const insightPrompt = buildPageInsightContextPrompt(insight);
+    setModelInputPreview((prev) => ({
+      ...prev,
+      lastPageInsightPrompt: insightPrompt,
+      lastPageInsightGeneratedAt: insight.generatedAt,
+    }));
+    recordAnalyticsEventSafe({
+      source: 'browserbud-ui',
+      eventType: 'input.page_insight_injected',
+      appName: 'Chrome',
+      pageTitle: insight.title,
+      url: insight.url,
+      domain: buildPageContextDetails(latestBrowserContextRef.current).domain,
+      payload: {
+        prompt: insightPrompt,
+        summary: insight.summary,
+        keyPoints: insight.keyPoints,
+        likelyUserGoals: insight.likelyUserGoals,
+        navigationTips: insight.navigationTips,
+        pageKind: insight.pageKind,
+        documentTextLength: insight.documentTextLength,
+      },
+    });
+    sendSessionPrompt(insightPrompt, { suppressOutput: true });
+  };
+
+  const flushDeferredSupplementalInputs = () => {
+    if (!isRunning || isModelSpeakingRef.current || pendingToolCallRef.current) {
+      return;
+    }
+
+    if (queuedBrowserContextInjectionRef.current) {
+      const queued = queuedBrowserContextInjectionRef.current;
+      queuedBrowserContextInjectionRef.current = null;
+      injectBrowserContextPrompt(queued.packet, queued.prompt);
+      return;
+    }
+
+    if (queuedPageInsightInjectionRef.current) {
+      const queuedInsight = queuedPageInsightInjectionRef.current;
+      queuedPageInsightInjectionRef.current = null;
+      injectPageInsightPrompt(queuedInsight);
+    }
+  };
+
   const getCurrentPageDocument = async (): Promise<CurrentPageDocument | null> => {
     const packet = latestBrowserContextRef.current;
     if (!packet) {
@@ -2485,6 +2554,23 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                     required: ['query'],
                   },
                 },
+                ...(elementHighlightingEnabled
+                  ? [{
+                    name: 'highlightPageElement',
+                    description: 'Highlight a visible page element in the browser using the Chrome extension. Use this when the user asks where to click or what control to use next.',
+                    parameters: {
+                      type: Type.OBJECT,
+                      properties: {
+                        anchorId: { type: Type.STRING, description: 'Known anchor id when available.' },
+                        name: { type: Type.STRING, description: 'Visible label or accessible name of the target element.' },
+                        role: { type: Type.STRING, description: 'Role such as button, link, tab, input, or select.' },
+                        nearbyHeading: { type: Type.STRING, description: 'Nearby heading or section label to disambiguate similar controls.' },
+                        scrollIntoView: { type: Type.BOOLEAN, description: 'Scroll the target element into view before highlighting it.' },
+                      },
+                      required: ['name'],
+                    },
+                  }]
+                  : []),
               ]
               : [])
           ]
@@ -2500,6 +2586,10 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
         config.toolConfig.includeServerSideToolInvocations = true;
       } else {
         config.systemInstruction.parts[0].text += '\n- Google Search is disabled for this session. Answer from the visible context unless the user explicitly asks you to search later.';
+      }
+
+      if (browserContextEnabled && elementHighlightingEnabled) {
+        config.systemInstruction.parts[0].text += '\n- Experimental element highlighting is available. When the user asks where to click, you may call highlightPageElement for a visible control on the current browsing page.';
       }
 
       const sessionPromise = aiClient.live.connect({
@@ -2697,6 +2787,7 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
               } else {
                 commitModelTurn();
               }
+              flushDeferredSupplementalInputs();
             }
 
             if (message.serverContent?.interrupted) {
@@ -2715,6 +2806,7 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
               } else {
                 commitModelTurn(' [Interrupted]');
               }
+              flushDeferredSupplementalInputs();
             }
 
             if (message.toolCall) {
@@ -2967,17 +3059,70 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                         },
                       });
                     }
+
+                    if (call.name === 'highlightPageElement') {
+                      const args = call.args as any;
+                      const packet = latestBrowserContextRef.current;
+                      if (!elementHighlightingEnabled) {
+                        functionResponses.push({
+                          id: call.id,
+                          name: call.name,
+                          response: {
+                            error: 'Experimental element highlighting is disabled.',
+                          },
+                        });
+                        continue;
+                      }
+
+                      const response = await requestBrowserBudElementHighlight({
+                        anchorId: typeof args?.anchorId === 'string' ? args.anchorId : '',
+                        name: typeof args?.name === 'string' ? args.name : '',
+                        role: typeof args?.role === 'string' ? args.role : '',
+                        nearbyHeading: typeof args?.nearbyHeading === 'string' ? args.nearbyHeading : '',
+                        scrollIntoView: args?.scrollIntoView !== false,
+                      });
+
+                      recordAnalyticsEventSafe({
+                        source: 'browserbud-ui',
+                        eventType: 'tool.page_element_highlighted',
+                        appName: 'Chrome',
+                        pageTitle: packet?.title || null,
+                        url: response?.url || packet?.url || null,
+                        domain: packet?.domain || null,
+                        payload: {
+                          requestedName: typeof args?.name === 'string' ? args.name : null,
+                          requestedRole: typeof args?.role === 'string' ? args.role : null,
+                          nearbyHeading: typeof args?.nearbyHeading === 'string' ? args.nearbyHeading : null,
+                          success: Boolean(response?.ok),
+                          matchedName: response?.matchedName || null,
+                          matchedRole: response?.matchedRole || null,
+                          error: response?.error || null,
+                        },
+                      });
+
+                      functionResponses.push({
+                        id: call.id,
+                        name: call.name,
+                        response: response || {
+                          ok: false,
+                          error: 'Element highlight request timed out.',
+                        },
+                      });
+                      continue;
+                    }
                   }
 
                   if (functionResponses.length) {
                     sessionPromise.then((session) => {
                       session.sendToolResponse({ functionResponses });
                       pendingToolCallRef.current = false;
+                      flushDeferredSupplementalInputs();
                     }).catch(() => {
                       pendingToolCallRef.current = false;
                     });
                   } else {
                     pendingToolCallRef.current = false;
+                    flushDeferredSupplementalInputs();
                   }
                 })().catch(() => {
                   pendingToolCallRef.current = false;
@@ -3812,6 +3957,41 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
 	                            </button>
 	                          </div>
 	                        </div>
+
+	                        <div className="mt-4 rounded-2xl border border-stone-200 bg-stone-50 p-4">
+                          <div className="flex items-center justify-between gap-4">
+                            <div>
+                              <div className="text-xs font-medium uppercase tracking-[0.14em] text-stone-400">
+                                Experimental Flags
+                              </div>
+                              <p className="mt-1 text-sm leading-6 text-stone-500">
+                                Extension-driven features that are still being tuned.
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="mt-4 rounded-xl border border-stone-200 bg-white px-4 py-3">
+                            <label className="flex items-start justify-between gap-4">
+                              <div>
+                                <div className="text-sm font-medium text-stone-900">Element highlighting</div>
+                                <p className="mt-1 text-xs leading-5 text-stone-500">
+                                  Lets BrowserBud visually highlight the button, link, or input it wants you to use next on the browsing page.
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setElementHighlightingEnabled((current) => !current)}
+                                className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] transition-colors ${
+                                  elementHighlightingEnabled
+                                    ? 'bg-teal-600 text-white'
+                                    : 'border border-stone-200 bg-stone-50 text-stone-500'
+                                }`}
+                              >
+                                {elementHighlightingEnabled ? 'On' : 'Off'}
+                              </button>
+                            </label>
+                          </div>
+                        </div>
 
 	                        <div className="mt-4 rounded-2xl border border-stone-200 bg-stone-50 p-4">
 	                          <div className="flex items-start justify-between gap-3">
