@@ -6,7 +6,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { DEFAULT_AUTO_SAVE_INTERVAL_MS, buildAutoSavePrompt } from './autoSave';
 import { completeAnalyticsSession, createAnalyticsSession, fetchAnalyticsSessionTimeline, fetchAnalyticsSessions, fetchLatestAnalyticsSessionTimeline, generateAnalyticsSessionRecap, recordAnalyticsEvent, recordAnalyticsMemory, recordAnalyticsTurn } from './analyticsApi';
-import type { AnalyticsMemoryInput, AnalyticsRawEventInput, AnalyticsSessionListItem, AnalyticsSessionTimeline } from './analyticsTypes';
+import type { AnalyticsMemoryInput, AnalyticsRawEventInput, AnalyticsRawEventRecord, AnalyticsSessionListItem, AnalyticsSessionTimeline } from './analyticsTypes';
 import { buildAppTabPath, resolveAppTabRoute, type AppTabRoute } from './appSurface';
 import {
   buildBrowserContextPrompt,
@@ -58,6 +58,7 @@ const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
 
 const MAX_RECONNECT_ATTEMPTS = 6;
 const AUTO_COMMENTARY_USER_COOLDOWN_MS = 15000;
+const SCREEN_FRAME_FORENSIC_INTERVAL_MS = 15000;
 const TIMED_COMMENTARY_PROMPT = 'Provide a brief spoken commentary on what is happening on the screen right now. Keep it under two sentences unless the user asked for more detail.';
 
 const readStoredText = (key: string) => {
@@ -233,6 +234,7 @@ type LocalHistoryCapture = {
   helpfulInfoBaseline: string;
   activityLogBaseline: string;
   savedNotesBaseline: string;
+  events: AnalyticsRawEventRecord[];
 };
 
 function mergeHistorySessionItems(
@@ -336,6 +338,121 @@ const MARKDOWN_PROSE_CLASS =
 
 const COMPACT_MARKDOWN_PROSE_CLASS =
   `${MARKDOWN_PROSE_CLASS} prose-sm prose-headings:mb-2 prose-headings:mt-4 prose-p:my-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-hr:my-4`;
+
+function cleanInlineText(value?: string | null): string {
+  return (value || '').trim();
+}
+
+function truncateInlineText(value: string, maxLength = 220): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength - 1).trim()}...`;
+}
+
+function formatCompactUrl(url?: string | null): string | null {
+  const normalized = cleanInlineText(url);
+  if (!normalized) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    const path = `${parsed.pathname}${parsed.search}${parsed.hash}` || '/';
+    return `${parsed.hostname}${path}`;
+  } catch {
+    return normalized;
+  }
+}
+
+function buildPageContextDetails(packet?: BrowserContextPacket | null) {
+  const pageTitle = cleanInlineText(packet?.title) || null;
+  const url = cleanInlineText(packet?.url) || null;
+  const section = cleanInlineText(packet?.location.activeSection) || null;
+  const description = cleanInlineText(packet?.page.metaDescription) || cleanInlineText(packet?.page.mainTextExcerpt) || null;
+  const pageType = cleanInlineText(packet?.page.pageTypeHint) || null;
+  const contextLine = [
+    pageTitle,
+    formatCompactUrl(url),
+    section,
+  ].filter(Boolean).join(' · ');
+
+  return {
+    appName: packet ? 'Chrome' : null,
+    pageTitle,
+    url,
+    domain: cleanInlineText(packet?.domain) || null,
+    section,
+    description,
+    pageType,
+    contextLine: contextLine || null,
+  };
+}
+
+function buildHelpfulInfoEntryMarkdown(
+  timestampLabel: string,
+  title: string,
+  content: string,
+  context: ReturnType<typeof buildPageContextDetails>,
+): string {
+  const lines = [`### [${timestampLabel}] ${title}`, ''];
+
+  if (context.contextLine) {
+    lines.push(`_${context.contextLine}_`, '');
+  }
+
+  if (context.description) {
+    lines.push(`_${truncateInlineText(context.description, 180)}_`, '');
+  }
+
+  lines.push(content.trim(), '', '---', '', '');
+  return `${lines.join('\n')}\n`;
+}
+
+function buildSavedNoteMarkdown(
+  timestampLabel: string,
+  note: string,
+  context: ReturnType<typeof buildPageContextDetails>,
+): string {
+  const lines = [`- **[${timestampLabel}]** ${note.trim()}`];
+
+  if (context.contextLine) {
+    lines.push(`  _${context.contextLine}_`);
+  }
+
+  if (context.description) {
+    lines.push(`  _${truncateInlineText(context.description, 180)}_`);
+  }
+
+  return `${lines.join('\n')}\n`;
+}
+
+function isForensicHistoryEvent(event: AnalyticsRawEventRecord): boolean {
+  return event.eventType.startsWith('input.') || event.eventType.startsWith('tool.current_page_');
+}
+
+function readEventPayloadString(payload: Record<string, unknown>, key: string): string | null {
+  const value = payload[key];
+  if (typeof value === 'string') {
+    return cleanInlineText(value) || null;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return null;
+}
+
+function readEventPayloadStringArray(payload: Record<string, unknown>, key: string): string[] {
+  const value = payload[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .flatMap((entry) => typeof entry === 'string' ? [cleanInlineText(entry)] : [])
+    .filter(Boolean)
+    .slice(0, 6);
+}
 
 function stripSessionRecapHeading(markdown: string | null | undefined): string {
   return (markdown || '').replace(/^# Session Recap\s*/i, '').trim();
@@ -481,6 +598,8 @@ export default function App() {
   const latestPageInsightRef = useRef<PageInsight | null>(null);
   const lastInjectedPageInsightFingerprintRef = useRef<string | null>(null);
   const pageInsightWarmFingerprintRef = useRef<string | null>(null);
+  const lastScreenFrameForensicsAtRef = useRef(0);
+  const lastHelpfulOverlaySignatureRef = useRef<string | null>(null);
   
   // Interval Refs
   const videoIntervalRef = useRef<number | null>(null);
@@ -585,6 +704,9 @@ export default function App() {
       payload: {
         packetVersion: browserContextPacket.packetVersion,
         activeSection: browserContextPacket.location.activeSection || null,
+        description: browserContextPacket.page.metaDescription || browserContextPacket.page.mainTextExcerpt || null,
+        pageType: browserContextPacket.page.pageTypeHint || null,
+        breadcrumbLabels: browserContextPacket.location.breadcrumbLabels,
         primaryNavCount: browserContextPacket.navMap.primaryLinks.length,
         localNavCount: browserContextPacket.navMap.localLinks.length,
         headingCount: browserContextPacket.contentMap.headings.length,
@@ -607,6 +729,21 @@ export default function App() {
       lastBrowserContextPrompt: contextPrompt,
       lastBrowserContextCapturedAt: browserContextPacket.capturedAt,
     }));
+    recordAnalyticsEventSafe({
+      source: 'browserbud-ui',
+      eventType: 'input.browser_context_injected',
+      appName: 'Chrome',
+      pageTitle: browserContextPacket.title,
+      url: browserContextPacket.url,
+      domain: browserContextPacket.domain,
+      payload: {
+        prompt: contextPrompt,
+        activeSection: browserContextPacket.location.activeSection || null,
+        description: browserContextPacket.page.metaDescription || browserContextPacket.page.mainTextExcerpt || null,
+        primaryLinks: browserContextPacket.navMap.primaryLinks.slice(0, 6),
+        breadcrumbs: browserContextPacket.navMap.breadcrumbs.slice(0, 6),
+      },
+    });
     sendSessionPrompt(contextPrompt, { suppressOutput: true });
   }, [browserContextPacket, isRunning]);
 
@@ -718,8 +855,33 @@ export default function App() {
       lastPageInsightPrompt: insightPrompt,
       lastPageInsightGeneratedAt: pageInsight.generatedAt,
     }));
+    recordAnalyticsEventSafe({
+      source: 'browserbud-ui',
+      eventType: 'input.page_insight_injected',
+      appName: 'Chrome',
+      pageTitle: pageInsight.title,
+      url: pageInsight.url,
+      domain: buildPageContextDetails(latestBrowserContextRef.current).domain,
+      payload: {
+        prompt: insightPrompt,
+        summary: pageInsight.summary,
+        keyPoints: pageInsight.keyPoints,
+        likelyUserGoals: pageInsight.likelyUserGoals,
+        navigationTips: pageInsight.navigationTips,
+        pageKind: pageInsight.pageKind,
+        documentTextLength: pageInsight.documentTextLength,
+      },
+    });
     sendSessionPrompt(insightPrompt, { suppressOutput: true });
   }, [isRunning, pageInsight]);
+
+  useEffect(() => {
+    if (!pageInsight || !captureRequirements.requiresExtension) {
+      return;
+    }
+
+    postHelpfulOverlay(pageInsight.summary, pageInsight.title);
+  }, [pageInsight, captureRequirements.requiresExtension, extensionBridgeReady]);
 
   useEffect(() => {
     if (!showSettingsPanel) {
@@ -938,6 +1100,32 @@ export default function App() {
     return dataUrl.split(',')[1];
   };
 
+  const captureForensicScreenPreview = (): string | null => {
+    if (!videoRef.current || !isSharing) {
+      return null;
+    }
+
+    const video = videoRef.current;
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    if (!width || !height) {
+      return null;
+    }
+
+    const targetWidth = Math.min(320, width);
+    const targetHeight = Math.max(1, Math.round((height / width) * targetWidth));
+    const previewCanvas = document.createElement('canvas');
+    previewCanvas.width = targetWidth;
+    previewCanvas.height = targetHeight;
+    const previewContext = previewCanvas.getContext('2d');
+    if (!previewContext) {
+      return null;
+    }
+
+    previewContext.drawImage(video, 0, 0, targetWidth, targetHeight);
+    return previewCanvas.toDataURL('image/jpeg', 0.38);
+  };
+
   const recordSentScreenFrame = (base64Image: string) => {
     const timestamp = new Date().toISOString();
     setModelInputPreview((prev) => ({
@@ -945,6 +1133,28 @@ export default function App() {
       lastScreenFrameAt: timestamp,
     }));
     setLastScreenFramePreview(`data:image/jpeg;base64,${base64Image}`);
+
+    const nowMs = Date.now();
+    if (nowMs - lastScreenFrameForensicsAtRef.current < SCREEN_FRAME_FORENSIC_INTERVAL_MS) {
+      return;
+    }
+
+    lastScreenFrameForensicsAtRef.current = nowMs;
+    const pageContext = buildPageContextDetails(latestBrowserContextRef.current);
+    recordAnalyticsEventSafe({
+      source: 'browserbud-ui',
+      eventType: 'input.screen_frame_sampled',
+      appName: pageContext.appName,
+      pageTitle: pageContext.pageTitle,
+      url: pageContext.url,
+      domain: pageContext.domain,
+      payload: {
+        section: pageContext.section,
+        description: pageContext.description,
+        previewDataUrl: captureForensicScreenPreview(),
+        captureMode,
+      },
+    });
   };
 
   const playAudioChunk = (base64Audio: string) => {
@@ -1019,21 +1229,62 @@ export default function App() {
     return analyticsEventSeqRef.current;
   };
 
-  const recordAnalyticsEventSafe = (
-    input: Omit<AnalyticsRawEventInput, 'sessionId' | 'seq' | 'occurredAt'> & { occurredAt?: string },
-    sessionIdOverride?: string | null,
-  ) => {
-    const sessionId = sessionIdOverride || analyticsSessionIdRef.current;
-    if (!sessionId) {
+  const postHelpfulOverlay = (text: string, title?: string | null, visible = true) => {
+    if (!extensionBridgeReady) {
       return;
     }
 
-    void recordAnalyticsEvent({
+    const normalizedText = cleanInlineText(text);
+    const packet = latestBrowserContextRef.current;
+    const signature = visible
+      ? `${cleanInlineText(title)}|${packet?.url || ''}|${normalizedText}`
+      : 'hidden';
+
+    if (lastHelpfulOverlaySignatureRef.current === signature) {
+      return;
+    }
+
+    lastHelpfulOverlaySignatureRef.current = signature;
+    postBrowserBudBridgeRequest('SET_HELPFUL_OVERLAY', {
+      text: normalizedText,
+      title: cleanInlineText(title) || cleanInlineText(packet?.title) || '',
+      url: cleanInlineText(packet?.url) || '',
+      visible,
+    });
+  };
+
+  const recordAnalyticsEventSafe = (
+    input: Omit<AnalyticsRawEventInput, 'sessionId' | 'seq' | 'occurredAt'> & { occurredAt?: string },
+    sessionIdOverride?: string | null,
+  ): AnalyticsRawEventRecord | null => {
+    const sessionId = sessionIdOverride || analyticsSessionIdRef.current;
+    if (!sessionId) {
+      return null;
+    }
+
+    const event: AnalyticsRawEventRecord = {
       ...input,
+      id: input.id || crypto.randomUUID(),
       sessionId,
       seq: nextAnalyticsSeq(),
       occurredAt: input.occurredAt || new Date().toISOString(),
-    });
+      endedAt: input.endedAt ?? null,
+      appName: input.appName ?? null,
+      windowTitle: input.windowTitle ?? null,
+      tabId: input.tabId ?? null,
+      url: input.url ?? null,
+      domain: input.domain ?? null,
+      pageTitle: input.pageTitle ?? null,
+      payload: input.payload || {},
+      privacyTier: input.privacyTier || 'standard',
+    };
+
+    if (localHistoryCaptureRef.current?.sessionId === sessionId) {
+      localHistoryCaptureRef.current.events.push(event);
+    }
+
+    void recordAnalyticsEvent(event);
+    return event;
   };
 
   const recordAnalyticsMemorySafe = (input: Omit<AnalyticsMemoryInput, 'sessionId'>, sessionIdOverride?: string | null) => {
@@ -1076,11 +1327,17 @@ export default function App() {
 
     const timestampLabel = new Date().toLocaleTimeString();
     const normalizedTitle = typeof title === 'string' ? title.trim() : '';
-    const heading = normalizedTitle ? `### [${timestampLabel}] ${normalizedTitle}` : `### [${timestampLabel}] Helpful Info`;
-    const infoEntry = `${heading}\n\n${normalizedContent}\n\n---\n\n`;
+    const pageContext = buildPageContextDetails(latestBrowserContextRef.current);
+    const infoEntry = buildHelpfulInfoEntryMarkdown(
+      timestampLabel,
+      normalizedTitle || 'Helpful Info',
+      normalizedContent,
+      pageContext,
+    );
     const eventId = crypto.randomUUID();
 
     setHelpfulInfo((prev) => infoEntry + prev);
+    postHelpfulOverlay(normalizedContent, normalizedTitle || 'Helpful Info');
     if (logToTranscript) {
       setLogs((prev) => [{
         id: Math.random().toString(36).substring(7),
@@ -1096,16 +1353,25 @@ export default function App() {
       id: eventId,
       source: 'browserbud-ui',
       eventType: source === 'timed-auto-save' ? 'tool.helpful_info_auto_saved' : 'tool.helpful_info_saved',
+      appName: pageContext.appName,
+      pageTitle: pageContext.pageTitle,
+      url: pageContext.url,
+      domain: pageContext.domain,
       payload: {
         title: normalizedTitle || 'Helpful Info',
         content: normalizedContent,
         source,
+        section: pageContext.section,
+        description: pageContext.description,
+        pageType: pageContext.pageType,
+        contextLine: pageContext.contextLine,
       },
     });
     recordAnalyticsMemorySafe({
       memoryType: 'helpful_info',
       title: normalizedTitle || 'Helpful Info',
       bodyMd: normalizedContent,
+      sourceUrl: pageContext.url,
       sourceEventIds: [eventId],
     });
 
@@ -1202,6 +1468,21 @@ export default function App() {
       captureMode,
     });
 
+    localHistoryCaptureRef.current = {
+      sessionId,
+      startedAt,
+      sourceSurface,
+      personaId: selectedPersonality.id,
+      liveModel: LIVE_MODEL,
+      searchEnabled: sessionSearchEnabled,
+      captureMode,
+      existingLogIds: new Set(logs.map((entry) => entry.id)),
+      helpfulInfoBaseline: helpfulInfo,
+      activityLogBaseline: activityLog,
+      savedNotesBaseline: savedNotes,
+      events: [],
+    };
+
     recordAnalyticsEventSafe({
       source: 'browserbud-ui',
       eventType: isReconnect ? 'session.reconnected' : 'session.started',
@@ -1216,20 +1497,6 @@ export default function App() {
         extensionBridgeReady,
       },
     }, sessionId);
-
-    localHistoryCaptureRef.current = {
-      sessionId,
-      startedAt,
-      sourceSurface,
-      personaId: selectedPersonality.id,
-      liveModel: LIVE_MODEL,
-      searchEnabled: sessionSearchEnabled,
-      captureMode,
-      existingLogIds: new Set(logs.map((entry) => entry.id)),
-      helpfulInfoBaseline: helpfulInfo,
-      activityLogBaseline: activityLog,
-      savedNotesBaseline: savedNotes,
-    };
 
     if (historySurfaceOpen) {
       void refreshHistorySessions();
@@ -1340,48 +1607,13 @@ export default function App() {
           captureMode: localHistoryCapture.captureMode,
           createdAt: localHistoryCapture.startedAt,
         },
-        events: [
-          {
-            id: `${sessionId}-started`,
-            sessionId,
-            seq: 0,
-            source: 'browserbud-ui',
-            eventType: 'session.started',
-            occurredAt: localHistoryCapture.startedAt,
-            endedAt: null,
-            appName: 'BrowserBud',
-            windowTitle: null,
-            tabId: null,
-            url: null,
-            domain: null,
-            pageTitle: localHistoryCapture.personaId,
-            payload: {
-              searchEnabled: localHistoryCapture.searchEnabled,
-              localFallback: true,
-            },
-            privacyTier: 'standard',
+        events: localHistoryCapture.events.map((event) => ({
+          ...event,
+          payload: {
+            ...event.payload,
+            localFallback: true,
           },
-          {
-            id: `${sessionId}-stopped`,
-            sessionId,
-            seq: 1,
-            source: 'browserbud-ui',
-            eventType: 'session.stopped',
-            occurredAt: endedAt,
-            endedAt,
-            appName: 'BrowserBud',
-            windowTitle: null,
-            tabId: null,
-            url: null,
-            domain: null,
-            pageTitle: localHistoryCapture.personaId,
-            payload: {
-              reason,
-              localFallback: true,
-            },
-            privacyTier: 'standard',
-          },
-        ],
+        })),
         turns: localTurns,
         memories: localMemories,
         summaries: summary ? [summary] : [],
@@ -2425,11 +2657,21 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
 
                     if (call.name === 'logActivity') {
                       const args = call.args as any;
-                      const logEntry = formatActivityLogEntry(args, timestamp);
+                      const pageContext = buildPageContextDetails(latestBrowserContextRef.current);
+                      const activityInput = {
+                        appName: typeof args.appName === 'string' && args.appName.trim() ? args.appName.trim() : pageContext.appName || undefined,
+                        pageTitle: typeof args.pageTitle === 'string' && args.pageTitle.trim() ? args.pageTitle.trim() : pageContext.pageTitle || undefined,
+                        url: typeof args.url === 'string' && args.url.trim() ? args.url.trim() : pageContext.url || undefined,
+                        summary: typeof args.summary === 'string' && args.summary.trim() ? args.summary.trim() : undefined,
+                        details: typeof args.details === 'string' && args.details.trim() ? args.details.trim() : undefined,
+                        section: pageContext.section || undefined,
+                        description: pageContext.description || undefined,
+                      };
+                      const logEntry = formatActivityLogEntry(activityInput, timestamp);
                       const eventId = crypto.randomUUID();
-                      const pageTitle = typeof args.pageTitle === 'string' ? args.pageTitle.trim() : '';
-                      const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
-                      const urlValue = typeof args.url === 'string' ? args.url.trim() : '';
+                      const pageTitle = cleanInlineText(activityInput.pageTitle);
+                      const summary = cleanInlineText(activityInput.summary);
+                      const urlValue = cleanInlineText(activityInput.url);
                       let sourceUrl: string | null = null;
                       let sourceDomain: string | null = null;
                       try {
@@ -2445,16 +2687,18 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                         id: eventId,
                         source: 'browserbud-ui',
                         eventType: 'tool.activity_logged',
-                        appName: typeof args.appName === 'string' ? args.appName.trim() : null,
+                        appName: activityInput.appName || null,
                         url: sourceUrl,
                         domain: sourceDomain,
                         pageTitle: pageTitle || null,
                         payload: {
-                          appName: args.appName,
-                          pageTitle: args.pageTitle,
-                          url: args.url,
-                          summary: args.summary,
-                          details: args.details,
+                          appName: activityInput.appName || null,
+                          pageTitle: pageTitle || null,
+                          url: sourceUrl,
+                          summary: summary || null,
+                          details: activityInput.details || null,
+                          section: activityInput.section || null,
+                          description: activityInput.description || null,
                         },
                       });
                       recordAnalyticsMemorySafe({
@@ -2470,7 +2714,9 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
 
                     if (call.name === 'saveNote') {
                       const args = call.args as any;
-                      const noteEntry = `- **[${timestamp}]** ${args.note}\n`;
+                      const normalizedNote = typeof args.note === 'string' ? args.note.trim() : '';
+                      const pageContext = buildPageContextDetails(latestBrowserContextRef.current);
+                      const noteEntry = buildSavedNoteMarkdown(timestamp, normalizedNote || 'Saved Note', pageContext);
                       const eventId = crypto.randomUUID();
                       setSavedNotes((prev) => noteEntry + prev);
                       setLogs((prev) => [{ id: Math.random().toString(36).substring(7), timestamp: new Date(), text: '[Action]: Saved note to the Saved Notes tab.', role: 'system' }, ...prev]);
@@ -2478,14 +2724,22 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                         id: eventId,
                         source: 'browserbud-ui',
                         eventType: 'tool.note_saved',
+                        appName: pageContext.appName,
+                        pageTitle: pageContext.pageTitle,
+                        url: pageContext.url,
+                        domain: pageContext.domain,
                         payload: {
-                          note: args.note,
+                          note: normalizedNote,
+                          section: pageContext.section,
+                          description: pageContext.description,
+                          contextLine: pageContext.contextLine,
                         },
                       });
                       recordAnalyticsMemorySafe({
                         memoryType: 'saved_note',
-                        title: typeof args.note === 'string' && args.note.trim() ? args.note.trim().slice(0, 80) : 'Saved Note',
-                        bodyMd: typeof args.note === 'string' ? args.note : '',
+                        title: normalizedNote ? normalizedNote.slice(0, 80) : 'Saved Note',
+                        bodyMd: normalizedNote,
+                        sourceUrl: pageContext.url,
                         sourceEventIds: [eventId],
                       });
                       functionResponses.push({ id: call.id, name: call.name, response: { result: 'success' } });
@@ -2516,6 +2770,19 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                             }
                             : null,
                           ...(document ? buildCurrentPageToolResult(document) : {}),
+                        },
+                      });
+                      recordAnalyticsEventSafe({
+                        source: 'browserbud-ui',
+                        eventType: 'tool.current_page_inspected',
+                        appName: 'Chrome',
+                        pageTitle: packet.title,
+                        url: packet.url,
+                        domain: packet.domain,
+                        payload: {
+                          preparedInsightReady: Boolean(latestPageInsightRef.current),
+                          fullDocumentAvailable: Boolean(document),
+                          documentTextLength: document?.documentTextLength || packet.page.documentTextLength || null,
                         },
                       });
                       continue;
@@ -2559,6 +2826,20 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                           text: chunk.text,
                         },
                       });
+                      recordAnalyticsEventSafe({
+                        source: 'browserbud-ui',
+                        eventType: 'tool.current_page_chunk_read',
+                        appName: 'Chrome',
+                        pageTitle: packet.title,
+                        url: packet.url,
+                        domain: packet.domain,
+                        payload: {
+                          chunkNumber: chunk.chunkNumber,
+                          totalChunks: chunk.totalChunks,
+                          source: document?.source || 'extension-context',
+                          textPreview: truncateInlineText(chunk.text, 240),
+                        },
+                      });
                       continue;
                     }
 
@@ -2585,6 +2866,20 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                           resultCount: results.length,
                           results,
                           source: document?.source || 'extension-context',
+                        },
+                      });
+                      recordAnalyticsEventSafe({
+                        source: 'browserbud-ui',
+                        eventType: 'tool.current_page_searched',
+                        appName: 'Chrome',
+                        pageTitle: packet.title,
+                        url: packet.url,
+                        domain: packet.domain,
+                        payload: {
+                          query,
+                          resultCount: results.length,
+                          source: document?.source || 'extension-context',
+                          topResultPreview: results[0] ? truncateInlineText(results[0], 240) : null,
                         },
                       });
                     }
@@ -2655,6 +2950,7 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
     shouldStayConnectedRef.current = false;
     isStoppingRef.current = true;
     lastInjectedBrowserContextPromptRef.current = null;
+    postHelpfulOverlay('', null, false);
     clearReconnectTimer();
     cleanupLiveSession({ closeSession: true, stopMic: true });
     setIsRunning(false);
@@ -2677,6 +2973,7 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
     return () => {
       isUnmountingRef.current = true;
       shouldStayConnectedRef.current = false;
+      postHelpfulOverlay('', null, false);
       clearReconnectTimer();
       void finalizeAnalyticsSession('app_unmounted', { skipRecap: true });
       cleanupLiveSession({ closeSession: true, stopMic: true });
@@ -2684,8 +2981,15 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
   }, []);
 
   const selectedHistorySession = historySessions.find((item) => item.session.id === selectedHistorySessionId) || null;
-  const historyTurns = selectedHistoryTimeline ? [...selectedHistoryTimeline.turns].reverse().slice(0, 6) : [];
-  const historyEvents = selectedHistoryTimeline ? [...selectedHistoryTimeline.events].reverse().slice(0, 8) : [];
+  const orderedHistoryTurns = selectedHistoryTimeline
+    ? [...selectedHistoryTimeline.turns].sort((left, right) => right.startedAt.localeCompare(left.startedAt))
+    : [];
+  const orderedHistoryEvents = selectedHistoryTimeline
+    ? [...selectedHistoryTimeline.events].sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+    : [];
+  const historyTurns = orderedHistoryTurns.slice(0, 6);
+  const historyForensicEvents = orderedHistoryEvents.filter(isForensicHistoryEvent).slice(0, 10);
+  const historyEvents = orderedHistoryEvents.filter((event) => !isForensicHistoryEvent(event)).slice(0, 10);
   const historyMemories = selectedHistoryTimeline ? selectedHistoryTimeline.memories.slice(0, 8) : [];
   const transcriptFeed = buildTranscriptFeed(
     logs.map((log) => ({
@@ -2750,6 +3054,81 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
     }
     return 'Start Companion';
   })();
+  const renderHistoryEventCard = (event: AnalyticsRawEventRecord, variant: 'forensic' | 'raw' = 'raw') => {
+    const payload = event.payload || {};
+    const section = readEventPayloadString(payload, 'section') || readEventPayloadString(payload, 'activeSection');
+    const description = readEventPayloadString(payload, 'description');
+    const contextLine = [
+      cleanInlineText(event.pageTitle) || readEventPayloadString(payload, 'pageTitle'),
+      formatCompactUrl(event.url),
+      section,
+    ].filter(Boolean).join(' · ');
+    const prompt = readEventPayloadString(payload, 'prompt');
+    const summary = readEventPayloadString(payload, 'summary')
+      || readEventPayloadString(payload, 'note')
+      || readEventPayloadString(payload, 'topResultPreview')
+      || readEventPayloadString(payload, 'textPreview');
+    const previewDataUrl = readEventPayloadString(payload, 'previewDataUrl');
+    const keyPoints = readEventPayloadStringArray(payload, 'keyPoints');
+    const navigationTips = readEventPayloadStringArray(payload, 'navigationTips');
+
+    return (
+      <div
+        key={event.id}
+        className={`rounded-xl border px-4 py-3 ${
+          variant === 'forensic'
+            ? 'border-teal-200 bg-teal-50/60'
+            : 'border-stone-200 bg-stone-50'
+        }`}
+      >
+        <div className="flex flex-wrap items-center gap-2 text-xs text-stone-400">
+          <span className="font-medium uppercase tracking-[0.12em] text-teal-700">{event.eventType}</span>
+          <span>{new Date(event.occurredAt).toLocaleTimeString()}</span>
+          {event.domain && <span>{event.domain}</span>}
+        </div>
+        {contextLine && (
+          <div className="mt-2 text-sm font-medium text-stone-900">{contextLine}</div>
+        )}
+        {description && (
+          <div className="mt-2 text-sm leading-6 text-stone-600">{description}</div>
+        )}
+        {summary && !prompt && (
+          <div className="mt-2 text-sm leading-6 text-stone-700">{summary}</div>
+        )}
+        {previewDataUrl && (
+          <img
+            src={previewDataUrl}
+            alt="Sampled screen frame preview"
+            className="mt-3 h-28 w-full rounded-xl border border-stone-200 object-cover"
+          />
+        )}
+        {prompt && (
+          <div className="mt-3">
+            <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Injected prompt</div>
+            <div className="mt-2 max-h-40 overflow-y-auto rounded-xl border border-stone-200 bg-white px-3 py-3 text-[11px] leading-5 text-stone-600 whitespace-pre-wrap">
+              {prompt}
+            </div>
+          </div>
+        )}
+        {(keyPoints.length > 0 || navigationTips.length > 0) && (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {keyPoints.length > 0 && (
+              <div className="rounded-lg border border-stone-200 bg-white px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Key points</div>
+                <div className="mt-1 text-xs leading-5 text-stone-600">{keyPoints.join(' · ')}</div>
+              </div>
+            )}
+            {navigationTips.length > 0 && (
+              <div className="rounded-lg border border-stone-200 bg-white px-3 py-2">
+                <div className="text-[11px] uppercase tracking-[0.14em] text-stone-400">Navigation</div>
+                <div className="mt-1 text-xs leading-5 text-stone-600">{navigationTips.join(' · ')}</div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   useEffect(() => {
     if (activeTab !== 'transcript') {
@@ -2923,6 +3302,11 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
 		                <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
 		                  <div className="text-sm font-medium text-stone-900">{browserContextPacket.title}</div>
 		                  <div className="mt-1 break-all text-xs text-teal-700">{browserContextPacket.url}</div>
+                      {cleanInlineText(browserContextPacket.page.metaDescription) && (
+                        <div className="mt-2 text-xs leading-5 text-stone-500">
+                          {browserContextPacket.page.metaDescription}
+                        </div>
+                      )}
 		                  <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-stone-500">
 		                    <div className="rounded-lg border border-stone-200 bg-stone-50 px-2 py-2">
 		                      <div className="uppercase tracking-[0.12em] text-stone-400">Section</div>
@@ -3712,10 +4096,10 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                             </div>
                           </div>
 
-	                          <div className="rounded-2xl border border-stone-200 bg-white p-5">
-	                            <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Analysis</div>
-	                            <h3 className="mt-1 text-lg font-semibold text-stone-900">Session recap</h3>
-	                            {selectedHistorySummary ? (
+                          <div className="rounded-2xl border border-stone-200 bg-white p-5">
+                            <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Analysis</div>
+                            <h3 className="mt-1 text-lg font-semibold text-stone-900">Session recap</h3>
+                            {selectedHistorySummary ? (
 	                              <div className={`${MARKDOWN_PROSE_CLASS} mt-4`}>
 	                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedHistorySummary.markdown}</ReactMarkdown>
 	                              </div>
@@ -3724,6 +4108,18 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                                 No recap has been generated for this session yet. Stop the session or refresh after the recap finishes.
                               </p>
                             )}
+                          </div>
+
+                          <div className="rounded-2xl border border-stone-200 bg-white p-5">
+                            <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Model Inputs</div>
+                            <h3 className="mt-1 text-lg font-semibold text-stone-900">What BrowserBud actually ingested</h3>
+                            <div className="mt-4 space-y-3">
+                              {historyForensicEvents.length > 0 ? historyForensicEvents.map((event) => renderHistoryEventCard(event, 'forensic')) : (
+                                <p className="text-sm text-stone-500">
+                                  No prompt injections or sampled visual inputs were stored for this session. Older sessions will stay sparse until they are recorded with the new forensic capture path.
+                                </p>
+                              )}
+                            </div>
                           </div>
 
                           <div className="grid gap-5 xl:grid-cols-2">
@@ -3768,18 +4164,7 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                             <div className="text-[11px] uppercase tracking-[0.16em] text-stone-400">Raw Context</div>
                             <h3 className="mt-1 text-lg font-semibold text-stone-900">Recent events</h3>
                             <div className="mt-4 space-y-3">
-                              {historyEvents.length > 0 ? historyEvents.map((event) => (
-                                <div key={event.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
-                                  <div className="flex flex-wrap items-center gap-2 text-xs text-stone-400">
-                                    <span className="font-medium uppercase tracking-[0.12em] text-teal-600">{event.eventType}</span>
-                                    <span>{new Date(event.occurredAt).toLocaleTimeString()}</span>
-                                    {event.domain && <span>{event.domain}</span>}
-                                  </div>
-                                  <div className="mt-2 text-sm text-stone-700">
-                                    {event.pageTitle || event.url || event.appName || 'No page or app context'}
-                                  </div>
-                                </div>
-                              )) : (
+                              {historyEvents.length > 0 ? historyEvents.map((event) => renderHistoryEventCard(event, 'raw')) : (
                                 <p className="text-sm text-stone-500">No raw events recorded for this session yet.</p>
                               )}
                             </div>

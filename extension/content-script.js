@@ -5,6 +5,7 @@ const APP_ORIGINS = new Set([
 ]);
 
 const MAX_DOCUMENT_TEXT_CHARS = 240000;
+const OVERLAY_ELEMENT_ID = 'browserbud-live-helpful-overlay';
 
 const isBrowserBudPage = APP_ORIGINS.has(window.location.origin);
 
@@ -172,6 +173,13 @@ function readMainTextExcerpt() {
   return limitText(root?.textContent || '', 280);
 }
 
+function readMetaDescription() {
+  const description = document.querySelector('meta[name="description"]')?.getAttribute('content')
+    || document.querySelector('meta[property="og:description"]')?.getAttribute('content')
+    || '';
+  return limitText(description, 220) || null;
+}
+
 function readDocumentText() {
   const root = document.querySelector('main, article, [role="main"]') || document.body;
   const fullText = normalizeDocumentText(root?.innerText || root?.textContent || '');
@@ -237,6 +245,7 @@ function collectPageContext(navEvent) {
       search: window.location.search,
       hash: window.location.hash,
       pageTypeHint: cleanText(document.body?.getAttribute('data-page-type')) || null,
+      metaDescription: readMetaDescription(),
       mainTextExcerpt: readMainTextExcerpt(),
       documentText: documentText.text || null,
       documentTextLength: documentText.textLength,
@@ -278,6 +287,54 @@ function postReady(version) {
       version,
     },
   });
+}
+
+function removeHelpfulOverlay() {
+  document.getElementById(OVERLAY_ELEMENT_ID)?.remove();
+}
+
+function ensureHelpfulOverlay() {
+  let element = document.getElementById(OVERLAY_ELEMENT_ID);
+  if (element) {
+    return element;
+  }
+
+  element = document.createElement('div');
+  element.id = OVERLAY_ELEMENT_ID;
+  Object.assign(element.style, {
+    position: 'fixed',
+    right: '20px',
+    bottom: '20px',
+    zIndex: '2147483646',
+    maxWidth: '360px',
+    minWidth: '220px',
+    padding: '14px 16px',
+    borderRadius: '18px',
+    background: 'rgba(15, 23, 42, 0.92)',
+    color: '#f8fafc',
+    boxShadow: '0 18px 40px rgba(15, 23, 42, 0.32)',
+    fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+    fontSize: '14px',
+    lineHeight: '1.5',
+    letterSpacing: '0.01em',
+    whiteSpace: 'pre-wrap',
+    backdropFilter: 'blur(14px)',
+    border: '1px solid rgba(148, 163, 184, 0.22)',
+    pointerEvents: 'none',
+  });
+  document.documentElement.appendChild(element);
+  return element;
+}
+
+function renderHelpfulOverlay(text) {
+  const normalized = cleanText(text);
+  if (!normalized || isBrowserBudPage) {
+    removeHelpfulOverlay();
+    return;
+  }
+
+  const element = ensureHelpfulOverlay();
+  element.textContent = normalized;
 }
 
 if (isBrowserBudPage) {
@@ -333,6 +390,17 @@ if (isBrowserBudPage) {
           },
         });
       });
+      return;
+    }
+
+    if (message.type === 'BROWSERBUD_SET_HELPFUL_OVERLAY') {
+      chrome.runtime.sendMessage({
+        type: 'BROWSERBUD_SET_HELPFUL_OVERLAY',
+        text: typeof message.payload?.text === 'string' ? message.payload.text : '',
+        title: typeof message.payload?.title === 'string' ? message.payload.title : '',
+        url: typeof message.payload?.url === 'string' ? message.payload.url : '',
+        visible: message.payload?.visible !== false,
+      }, () => {});
     }
   });
 }
@@ -356,6 +424,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       type: 'BROWSERBUD_CONTEXT_PACKET',
       payload: message.packet,
     });
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === 'BROWSERBUD_OVERLAY_UPDATE') {
+    renderHelpfulOverlay(typeof message.text === 'string' ? message.text : '');
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === 'BROWSERBUD_OVERLAY_CLEAR') {
+    removeHelpfulOverlay();
     sendResponse({ ok: true });
     return false;
   }

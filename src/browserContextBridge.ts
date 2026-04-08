@@ -3,7 +3,8 @@ import { isBrowserContextPacket, type BrowserContextPacket } from './browserCont
 export type BrowserBudBridgeRequestType =
   | 'REQUEST_ACTIVE_CONTEXT'
   | 'REQUEST_EXTENSION_STATUS'
-  | 'REQUEST_PAGE_RESOURCE';
+  | 'REQUEST_PAGE_RESOURCE'
+  | 'SET_HELPFUL_OVERLAY';
 
 type BrowserBudBridgeRequest = {
   source: 'browserbud-app';
@@ -11,6 +12,9 @@ type BrowserBudBridgeRequest = {
   payload?: {
     requestId?: string;
     url?: string;
+    text?: string;
+    title?: string;
+    visible?: boolean;
   };
 };
 
@@ -121,12 +125,15 @@ export function parseBrowserBudBridgeMessage(value: unknown): BrowserBudBridgeEv
   return null;
 }
 
-export function postBrowserBudBridgeRequest(type: BrowserBudBridgeRequestType) {
+export function postBrowserBudBridgeRequest(
+  type: BrowserBudBridgeRequestType,
+  payload?: BrowserBudBridgeRequest['payload'],
+) {
   if (typeof window === 'undefined') {
     return;
   }
 
-  window.postMessage(createBrowserBudBridgeRequest(type), window.location.origin);
+  window.postMessage(createBrowserBudBridgeRequest(type, payload), window.location.origin);
 }
 
 export function subscribeToBrowserBudBridge(

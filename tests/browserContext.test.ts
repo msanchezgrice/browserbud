@@ -27,6 +27,7 @@ function createPacket(overrides: Partial<BrowserContextPacket> = {}): BrowserCon
       search: '',
       hash: '',
       pageTypeHint: 'pricing',
+      metaDescription: 'Compare BrowserBud plans, memory features, and enterprise options.',
       mainTextExcerpt: 'Compare plans and find the right BrowserBud tier.',
       documentText: [
         'BrowserBud pricing overview.',
@@ -114,6 +115,7 @@ test('buildBrowserContextPrompt compresses useful site context for live enrichme
   assert.match(prompt, /Pricing table/);
   assert.match(prompt, /Product, Pricing/);
   assert.match(prompt, /Start free trial/);
+  assert.match(prompt, /Page description: Compare BrowserBud plans/i);
   assert.match(prompt, /Do not respond aloud/i);
 });
 
@@ -158,6 +160,7 @@ test('buildCurrentPageToolSnapshot returns a compact tool payload for current-pa
 
   assert.equal(snapshot.url, 'https://browserbud.com/pricing');
   assert.equal(snapshot.title, 'Pricing - BrowserBud');
+  assert.equal(snapshot.metaDescription, 'Compare BrowserBud plans, memory features, and enterprise options.');
   assert.equal(snapshot.documentTextLength, 146);
   assert.equal(snapshot.topHeadings[0], 'Pricing');
   assert.equal(snapshot.anchorNames[0], 'Start free trial');

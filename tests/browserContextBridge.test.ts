@@ -23,6 +23,7 @@ const packet: BrowserContextPacket = {
     search: '',
     hash: '',
     pageTypeHint: 'pricing',
+    metaDescription: 'Pricing details for BrowserBud.',
     mainTextExcerpt: 'Pricing page',
   },
   location: {
@@ -59,6 +60,22 @@ test('createBrowserBudBridgeRequest builds an app-to-extension request envelope'
     payload: {
       requestId: 'request-1',
       url: 'https://browserbud.com/pricing.pdf',
+    },
+  });
+
+  assert.deepEqual(createBrowserBudBridgeRequest('SET_HELPFUL_OVERLAY', {
+    text: 'The annual plan toggle is below the fold.',
+    title: 'Pricing - BrowserBud',
+    url: 'https://browserbud.com/pricing',
+    visible: true,
+  }), {
+    source: 'browserbud-app',
+    type: 'BROWSERBUD_SET_HELPFUL_OVERLAY',
+    payload: {
+      text: 'The annual plan toggle is below the fold.',
+      title: 'Pricing - BrowserBud',
+      url: 'https://browserbud.com/pricing',
+      visible: true,
     },
   });
 });

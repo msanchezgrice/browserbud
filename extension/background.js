@@ -6,6 +6,10 @@ const APP_ORIGINS = new Set([
 
 const MAX_TEXT_RESPONSE_CHARS = 500000;
 const MAX_BINARY_RESPONSE_BYTES = 15 * 1024 * 1024;
+const MAX_OVERLAY_TEXT_CHARS = 900;
+
+let latestContextPacket = null;
+let latestHelpfulOverlay = null;
 
 function isHttpUrl(url) {
   return typeof url === 'string' && /^https?:\/\//.test(url);
@@ -123,6 +127,34 @@ async function collectPageContextFromTab(tabId, navEvent) {
   return response.packet;
 }
 
+function normalizeOverlayText(value) {
+  return (value || '').replace(/\s+/g, ' ').trim().slice(0, MAX_OVERLAY_TEXT_CHARS);
+}
+
+async function applyHelpfulOverlayToTab(tabId) {
+  if (typeof tabId !== 'number') {
+    return;
+  }
+
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab?.id || !isHttpUrl(tab.url) || isBrowserBudUrl(tab.url)) {
+    return;
+  }
+
+  if (!latestHelpfulOverlay?.text) {
+    await sendMessageToTab(tab.id, { type: 'BROWSERBUD_OVERLAY_CLEAR' });
+    return;
+  }
+
+  await sendMessageToTab(tab.id, {
+    type: 'BROWSERBUD_OVERLAY_UPDATE',
+    text: latestHelpfulOverlay.text,
+    title: latestHelpfulOverlay.title || '',
+    url: latestHelpfulOverlay.url || '',
+    updatedAt: latestHelpfulOverlay.updatedAt,
+  });
+}
+
 async function broadcastPacket(packet) {
   const tabs = await chrome.tabs.query({});
   await Promise.all(tabs
@@ -153,7 +185,9 @@ async function requestAndBroadcastActiveContext(navEvent = 'content_snapshot') {
     return null;
   }
 
+  latestContextPacket = packet;
   await broadcastPacket(packet);
+  await applyHelpfulOverlayToTab(activeTab.id);
   return packet;
 }
 
@@ -165,7 +199,9 @@ function queueContextCollection(tabId, navEvent, delayMs = 150) {
   globalThis.setTimeout(async () => {
     const packet = await collectPageContextFromTab(tabId, navEvent);
     if (packet) {
+      latestContextPacket = packet;
       await broadcastPacket(packet);
+      await applyHelpfulOverlayToTab(tabId);
     }
   }, delayMs);
 }
@@ -200,7 +236,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === 'BROWSERBUD_SET_HELPFUL_OVERLAY') {
+    const text = normalizeOverlayText(message.text);
+    latestHelpfulOverlay = message.visible === false || !text
+      ? null
+      : {
+        text,
+        title: typeof message.title === 'string' ? message.title : '',
+        url: typeof message.url === 'string' ? message.url : '',
+        updatedAt: new Date().toISOString(),
+      };
+
+    const targetTabId = typeof latestContextPacket?.tabId === 'number'
+      ? latestContextPacket.tabId
+      : null;
+
+    if (targetTabId) {
+      applyHelpfulOverlayToTab(targetTabId).then(() => {
+        sendResponse({ ok: true });
+      });
+      return true;
+    }
+
+    getActiveHttpTab().then((tab) => {
+      if (tab?.id) {
+        return applyHelpfulOverlayToTab(tab.id);
+      }
+      return null;
+    }).finally(() => {
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
   if (message?.type === 'BROWSERBUD_CONTEXT_FROM_TAB' && message.packet) {
+    latestContextPacket = message.packet;
     broadcastPacket(message.packet).then(() => {
       sendResponse({ ok: true });
     });

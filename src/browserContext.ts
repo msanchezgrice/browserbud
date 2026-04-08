@@ -16,6 +16,7 @@ export type BrowserContextPacket = {
     search: string;
     hash: string;
     pageTypeHint?: string | null;
+    metaDescription?: string | null;
     mainTextExcerpt?: string | null;
     documentText?: string | null;
     documentTextLength?: number | null;
@@ -275,6 +276,10 @@ export function buildBrowserContextPrompt(packet: BrowserContextPacket): string 
     lines.push(`Page summary: ${excerpt}`);
   }
 
+  if (cleanText(packet.page.metaDescription)) {
+    lines.push(`Page description: ${cleanText(packet.page.metaDescription)}`);
+  }
+
   if (documentTextLength > 0) {
     lines.push(
       packet.page.documentTextTruncated
@@ -304,6 +309,7 @@ export function buildCurrentPageToolSnapshot(packet: BrowserContextPacket) {
     title: packet.title,
     pathname: packet.page.pathname || '/',
     activeSection: cleanText(packet.location.activeSection) || null,
+    metaDescription: cleanText(packet.page.metaDescription) || null,
     documentTextLength: packet.page.documentTextLength ?? documentText.length,
     documentTextTruncated: Boolean(packet.page.documentTextTruncated),
     chunkCount: chunks.length,

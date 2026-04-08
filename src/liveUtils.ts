@@ -6,6 +6,8 @@ export type ActivityLogEntryInput = {
   url?: string;
   summary?: string;
   details?: string;
+  section?: string;
+  description?: string;
 };
 
 export type PersistedLogEntry = {
@@ -96,6 +98,8 @@ export function formatActivityLogEntry(entry: ActivityLogEntryInput, timestamp: 
   const pageTitle = cleanField(entry.pageTitle);
   const url = cleanField(entry.url);
   const details = cleanField(entry.details);
+  const section = cleanField(entry.section);
+  const description = cleanField(entry.description);
 
   const lines = [
     `### [${timestamp}] ${summary}`,
@@ -107,8 +111,16 @@ export function formatActivityLogEntry(entry: ActivityLogEntryInput, timestamp: 
     lines.push(`- **Page:** ${pageTitle}`);
   }
 
+  if (section) {
+    lines.push(`- **Section:** ${section}`);
+  }
+
   if (url) {
     lines.push(`- **URL:** <${url}>`);
+  }
+
+  if (description) {
+    lines.push(`- **About:** ${description}`);
   }
 
   if (details) {

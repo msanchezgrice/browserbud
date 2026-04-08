@@ -21,13 +21,17 @@ test('formatActivityLogEntry renders structured activity metadata', () => {
     pageTitle: 'Pricing - BrowserBud',
     url: 'https://browserbud.com/pricing',
     summary: 'Comparing pricing options',
+    section: 'Enterprise',
+    description: 'Compare BrowserBud plans and enterprise options.',
     details: 'User is reviewing monthly versus annual plans.',
   }, '2:37:10 PM');
 
   assert.match(entry, /### \[2:37:10 PM\] Comparing pricing options/);
   assert.match(entry, /- \*\*App:\*\* Chrome/);
   assert.match(entry, /- \*\*Page:\*\* Pricing - BrowserBud/);
+  assert.match(entry, /- \*\*Section:\*\* Enterprise/);
   assert.match(entry, /- \*\*URL:\*\* <https:\/\/browserbud.com\/pricing>/);
+  assert.match(entry, /- \*\*About:\*\* Compare BrowserBud plans and enterprise options\./);
   assert.match(entry, /- \*\*Details:\*\* User is reviewing monthly versus annual plans\./);
 });
 
