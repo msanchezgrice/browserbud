@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { FunctionCallingConfigMode, GoogleGenAI, Modality, Type } from '@google/genai';
-import { Play, Square, Mic, MicOff, User, Clock, MessageSquare, Monitor, MonitorOff, Info, Plus, Trash2, RotateCcw, Settings, Search, FileText, BookOpen, List, Bookmark } from 'lucide-react';
+import { Play, Square, Mic, MicOff, User, Clock, MessageSquare, Monitor, MonitorOff, Info, Plus, Trash2, RotateCcw, Settings, Search, FileText, BookOpen, List, Bookmark, Globe } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -8,6 +8,8 @@ import { DEFAULT_AUTO_SAVE_INTERVAL_MS, buildAutoSavePrompt } from './autoSave';
 import { completeAnalyticsSession, createAnalyticsSession, fetchAnalyticsSessionTimeline, fetchAnalyticsSessions, fetchLatestAnalyticsSessionTimeline, generateAnalyticsSessionRecap, recordAnalyticsEvent, recordAnalyticsMemory, recordAnalyticsTurn } from './analyticsApi';
 import type { AnalyticsMemoryInput, AnalyticsRawEventInput, AnalyticsSessionListItem, AnalyticsSessionTimeline } from './analyticsTypes';
 import { buildAppTabPath, resolveAppTabRoute, type AppTabRoute } from './appSurface';
+import { buildBrowserContextPrompt, getCaptureModeRequirements, isSignificantBrowserContextUpdate, type BrowserContextPacket, type CaptureMode } from './browserContext';
+import { postBrowserBudBridgeRequest, subscribeToBrowserBudBridge } from './browserContextBridge';
 import { createStoredApiKeyController } from './clientConfig';
 import { buildRehydratedSessionState, buildTranscriptFeed, formatActivityLogEntry, formatLatency, mergeIncrementalTranscript, parseStoredLogEntries, serializeLogEntries, shouldCommitUserTranscript, shouldRunTimedBackgroundSave, truncateSessionHandle } from './liveUtils';
 import { buildLocalSessionRecapSummary, getLatestStoredAnalyticsSessionTimeline, getStoredAnalyticsSessionTimeline, listStoredAnalyticsSessions, upsertStoredAnalyticsTimeline } from './localAnalyticsHistory';
@@ -91,6 +93,28 @@ const FREQUENCIES = [
   { id: 10000, name: 'Every 10 seconds' },
   { id: 30000, name: 'Every 30 seconds' },
   { id: 60000, name: 'Every 1 minute' },
+];
+
+const CAPTURE_MODES: Array<{
+  id: CaptureMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: 'multimodal',
+    label: 'Multimodal',
+    description: 'Use the Chrome extension and screen-share together.',
+  },
+  {
+    id: 'screen-share',
+    label: 'Screen Only',
+    description: 'Keep the current visual-only capture flow.',
+  },
+  {
+    id: 'browser-extension',
+    label: 'Extension Only',
+    description: 'Use browser-native context without screen-share.',
+  },
 ];
 
 type AppTab = AppTabRoute;
@@ -288,6 +312,7 @@ export default function App() {
 
   const [personality, setPersonality] = useState(personas[0].id);
   const [userApiKey, setUserApiKey] = useState(() => readInitialApiKey());
+  const [captureMode, setCaptureMode] = useState<CaptureMode>('multimodal');
   const [commentaryFrequency, setCommentaryFrequency] = useState(0);
   const [frequency, setFrequency] = useState(DEFAULT_AUTO_SAVE_INTERVAL_MS);
   const [isSharing, setIsSharing] = useState(false);
@@ -314,6 +339,10 @@ export default function App() {
   const [showAddPersona, setShowAddPersona] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
+  const [extensionBridgeReady, setExtensionBridgeReady] = useState(false);
+  const [extensionBridgeChecked, setExtensionBridgeChecked] = useState(false);
+  const [extensionVersion, setExtensionVersion] = useState<string | null>(null);
+  const [browserContextPacket, setBrowserContextPacket] = useState<BrowserContextPacket | null>(null);
   const [newPersonaName, setNewPersonaName] = useState('');
   const [newPersonaPrompt, setNewPersonaPrompt] = useState('');
   const [newPersonaVoice, setNewPersonaVoice] = useState(AVAILABLE_VOICES[0]);
@@ -333,6 +362,7 @@ export default function App() {
   const selectedPersonality = personas.find((option) => option.id === personality) || personas[0];
   const configuredApiKey = userApiKey.trim();
   const historySurfaceOpen = activeTab === 'history' || activeTab === 'memory';
+  const captureRequirements = getCaptureModeRequirements(captureMode);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -372,6 +402,9 @@ export default function App() {
   const analyticsEventSeqRef = useRef(0);
   const localHistoryCaptureRef = useRef<LocalHistoryCapture | null>(null);
   const timedHelpfulInfoSaveInFlightRef = useRef(false);
+  const latestBrowserContextRef = useRef<BrowserContextPacket | null>(null);
+  const previousBrowserContextRef = useRef<BrowserContextPacket | null>(null);
+  const lastInjectedBrowserContextPromptRef = useRef<string | null>(null);
   
   // Interval Refs
   const videoIntervalRef = useRef<number | null>(null);
@@ -404,6 +437,89 @@ export default function App() {
   useEffect(() => {
     createStoredApiKeyController(getSafeLocalStorage()).set(userApiKey);
   }, [userApiKey]);
+
+  useEffect(() => {
+    latestBrowserContextRef.current = browserContextPacket;
+  }, [browserContextPacket]);
+
+  useEffect(() => {
+    const markCheckedTimer = window.setTimeout(() => {
+      setExtensionBridgeChecked(true);
+    }, 1200);
+
+    const unsubscribe = subscribeToBrowserBudBridge((event) => {
+      setExtensionBridgeChecked(true);
+      setExtensionBridgeReady(true);
+      if (event.kind === 'ready') {
+        setExtensionVersion(event.version);
+        return;
+      }
+
+      setBrowserContextPacket(event.packet);
+    });
+
+    postBrowserBudBridgeRequest('REQUEST_EXTENSION_STATUS');
+    postBrowserBudBridgeRequest('REQUEST_ACTIVE_CONTEXT');
+
+    const statusPoll = window.setInterval(() => {
+      postBrowserBudBridgeRequest('REQUEST_EXTENSION_STATUS');
+    }, 8000);
+    const contextPoll = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        postBrowserBudBridgeRequest('REQUEST_ACTIVE_CONTEXT');
+      }
+    }, 5000);
+
+    return () => {
+      window.clearTimeout(markCheckedTimer);
+      window.clearInterval(statusPoll);
+      window.clearInterval(contextPoll);
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!browserContextPacket) {
+      return;
+    }
+
+    const previousPacket = previousBrowserContextRef.current;
+    const isSignificantUpdate = isSignificantBrowserContextUpdate(previousPacket, browserContextPacket);
+    previousBrowserContextRef.current = browserContextPacket;
+    if (!isSignificantUpdate) {
+      return;
+    }
+
+    recordAnalyticsEventSafe({
+      source: 'browser-extension',
+      eventType: `browser.${browserContextPacket.navEvent}`,
+      appName: 'Chrome',
+      pageTitle: browserContextPacket.title,
+      url: browserContextPacket.url,
+      domain: browserContextPacket.domain,
+      tabId: String(browserContextPacket.tabId),
+      payload: {
+        packetVersion: browserContextPacket.packetVersion,
+        activeSection: browserContextPacket.location.activeSection || null,
+        primaryNavCount: browserContextPacket.navMap.primaryLinks.length,
+        localNavCount: browserContextPacket.navMap.localLinks.length,
+        headingCount: browserContextPacket.contentMap.headings.length,
+        anchorCount: browserContextPacket.anchors.length,
+      },
+    });
+
+    if (!isRunning) {
+      return;
+    }
+
+    const contextPrompt = buildBrowserContextPrompt(browserContextPacket);
+    if (lastInjectedBrowserContextPromptRef.current === contextPrompt) {
+      return;
+    }
+
+    lastInjectedBrowserContextPromptRef.current = contextPrompt;
+    sendSessionPrompt(contextPrompt, { suppressOutput: true });
+  }, [browserContextPacket, isRunning]);
 
   useEffect(() => {
     if (!showSettingsPanel) {
@@ -858,7 +974,9 @@ export default function App() {
 
     const sharedStream = videoRef.current?.srcObject as MediaStream | null;
     const sharedTrack = sharedStream?.getVideoTracks?.()[0] || null;
-    const sourceSurface = sharedTrack?.getSettings?.().displaySurface || sharedTrack?.label || 'unknown';
+    const sourceSurface = captureRequirements.requiresScreenShare
+      ? (sharedTrack?.getSettings?.().displaySurface || sharedTrack?.label || 'unknown')
+      : (browserContextPacket?.domain ? `tab:${browserContextPacket.domain}` : 'browser-extension');
     const startedAt = new Date().toISOString();
 
     void createAnalyticsSession({
@@ -868,7 +986,7 @@ export default function App() {
       personaId: selectedPersonality.id,
       liveModel: LIVE_MODEL,
       searchEnabled: sessionSearchEnabled,
-      captureMode: 'screen-share',
+      captureMode,
     });
 
     recordAnalyticsEventSafe({
@@ -881,6 +999,8 @@ export default function App() {
         commentaryFrequencyMs: commentaryFrequency,
         helpfulInfoAutoSaveFrequencyMs: frequency,
         searchEnabled: sessionSearchEnabled,
+        captureMode,
+        extensionBridgeReady,
       },
     }, sessionId);
 
@@ -891,7 +1011,7 @@ export default function App() {
       personaId: selectedPersonality.id,
       liveModel: LIVE_MODEL,
       searchEnabled: sessionSearchEnabled,
-      captureMode: 'screen-share',
+      captureMode,
       existingLogIds: new Set(logs.map((entry) => entry.id)),
       helpfulInfoBaseline: helpfulInfo,
       activityLogBaseline: activityLog,
@@ -1165,7 +1285,8 @@ export default function App() {
     }
 
     const frameBase64 = captureFrame();
-    if (!frameBase64 || !configuredApiKey || timedHelpfulInfoSaveInFlightRef.current) {
+    const browserContext = latestBrowserContextRef.current;
+    if ((!frameBase64 && !browserContext) || !configuredApiKey || timedHelpfulInfoSaveInFlightRef.current) {
       return;
     }
 
@@ -1179,26 +1300,37 @@ export default function App() {
 
     try {
       const aiClient = new GoogleGenAI({ apiKey: configuredApiKey });
+      const parts: Array<Record<string, unknown>> = [];
+      if (frameBase64) {
+        parts.push({
+          inlineData: {
+            data: frameBase64,
+            mimeType: 'image/jpeg',
+          },
+        });
+      }
+      if (browserContext) {
+        parts.push({
+          text: `Browser context snapshot:\n${buildBrowserContextPrompt(browserContext)}`,
+        });
+      }
+      parts.push({
+        text: [
+          buildAutoSavePrompt(),
+          frameBase64
+            ? 'Use the attached screenshot as visual truth for what is visible right now.'
+            : 'No screenshot is attached for this save. Use the browser-native context snapshot only.',
+          browserContext
+            ? 'Prefer specific observations about the current URL, page structure, visible actions, likely user intent, and anything worth remembering.'
+            : 'Look only at the attached screenshot from the current browsing session.',
+          'Return concise markdown that would still be useful when reopened later.',
+        ].join(' '),
+      });
       const response = await aiClient.models.generateContent({
         model: TIMED_HELPFUL_INFO_MODEL,
         contents: [{
           role: 'user',
-          parts: [
-            {
-              inlineData: {
-                data: frameBase64,
-                mimeType: 'image/jpeg',
-              },
-            },
-            {
-              text: [
-                buildAutoSavePrompt(),
-                'Look only at the attached screenshot from the current browsing session.',
-                'Return concise markdown that would still be useful when reopened later.',
-                'Prefer specific observations, likely intent, next steps, links or entities visible on screen, and anything worth remembering.',
-              ].join(' '),
-            },
-          ],
+          parts,
         }],
         config: {
           temperature: 0.2,
@@ -1380,8 +1512,17 @@ export default function App() {
       return;
     }
 
-    if (!isSharing) {
-      alert('Please share a tab or screen first!');
+    if (captureRequirements.requiresScreenShare && !isSharing) {
+      alert(captureMode === 'multimodal'
+        ? 'Multimodal mode needs screen sharing and the Chrome extension. Share a tab or screen first.'
+        : 'Please share a tab or screen first!');
+      return;
+    }
+
+    if (captureRequirements.requiresExtension && !extensionBridgeReady) {
+      alert(captureMode === 'multimodal'
+        ? 'Multimodal mode needs the BrowserBud Chrome extension. Install it, reload BrowserBud, and try again.'
+        : 'Browser extension mode needs the BrowserBud Chrome extension. Install it, reload BrowserBud, and try again.');
       return;
     }
 
@@ -1390,11 +1531,18 @@ export default function App() {
       return;
     }
 
-    console.debug('Start live requested', { isSharing, hasApiKey: Boolean(configuredApiKey), isReconnect });
+    console.debug('Start live requested', {
+      isSharing,
+      hasApiKey: Boolean(configuredApiKey),
+      isReconnect,
+      captureMode,
+      extensionBridgeReady,
+    });
     isStartingRef.current = true;
     isStoppingRef.current = false;
     setErrorMsg(null);
     clearReconnectTimer();
+    lastInjectedBrowserContextPromptRef.current = null;
 
     if (!isReconnect) {
       shouldStayConnectedRef.current = true;
@@ -1424,7 +1572,12 @@ export default function App() {
       await micCtxRef.current.audioWorklet.addModule('/pcm-recorder-worklet.js');
 
       nextPlayTimeRef.current = playCtxRef.current.currentTime;
-      console.debug('Starting live session', { model: LIVE_MODEL, isReconnect, searchEnabled: sessionSearchEnabled });
+      console.debug('Starting live session', {
+        model: LIVE_MODEL,
+        isReconnect,
+        searchEnabled: sessionSearchEnabled,
+        captureMode,
+      });
 
       let currentTurnText = '';
       const commitUserTurn = () => {
@@ -1495,6 +1648,8 @@ export default function App() {
         pendingToolCallRef.current = false;
       };
 
+      const browserContextEnabled = captureRequirements.requiresExtension;
+      const screenContextEnabled = captureRequirements.requiresScreenShare;
       const config: any = {
         responseModalities: [Modality.AUDIO],
         outputAudioTranscription: {},
@@ -1503,7 +1658,7 @@ export default function App() {
         contextWindowCompression: { slidingWindow: {} },
         sessionResumption: { handle: sessionHandleRef.current || undefined },
         systemInstruction: {
-          parts: [{ text: `${selectedPersonality.prompt} You can see the user's screen and hear their voice. Respond naturally and keep spoken replies brief.
+          parts: [{ text: `${selectedPersonality.prompt} You can hear the user's voice. Respond naturally and keep spoken replies brief.
 
 Tool rules:
 - The Helpful Info tab stores reusable recommendations, links, and takeaways. If the user asks you to save something useful for later, call appendHelpfulInfo in this turn.
@@ -1511,7 +1666,9 @@ Tool rules:
 - The Activity Log tab stores structured records of meaningful task and page changes. When you call logActivity, include the app name, page title, visible URL if available, a one-line summary, and brief details. Call it when the user explicitly asks for logging or when there is a clear task/page change worth recording.
 - The Saved Notes tab stores direct reminders, todos, and remember-this requests. If the user says add a note, save this, or remember this, you must call saveNote in this turn before you finish responding.
 - Do not use tools on every turn.
-- Prioritize clean, complete spoken responses over fragmented quick replies.` }]
+- Prioritize clean, complete spoken responses over fragmented quick replies.
+${screenContextEnabled ? '- You receive live screen imagery from the current shared screen or tab. Use it as visual truth for what is actually visible.' : ''}
+${browserContextEnabled ? '- You also receive browser-native page context updates including URL, title, page structure, navigation, and visible action anchors. Use that context to improve navigation help and site understanding.' : ''}` }]
         },
         speechConfig: {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedPersonality.voiceName } }
@@ -1633,14 +1790,16 @@ Tool rules:
               }).catch(() => {});
             };
 
-            videoIntervalRef.current = window.setInterval(() => {
-              const base64Image = captureFrame();
-              if (base64Image) {
-                sessionPromise.then((session) => {
-                  session.sendRealtimeInput({ video: { data: base64Image, mimeType: 'image/jpeg' } });
-                }).catch(() => {});
-              }
-            }, 2000);
+            if (captureRequirements.requiresScreenShare) {
+              videoIntervalRef.current = window.setInterval(() => {
+                const base64Image = captureFrame();
+                if (base64Image) {
+                  sessionPromise.then((session) => {
+                    session.sendRealtimeInput({ video: { data: base64Image, mimeType: 'image/jpeg' } });
+                  }).catch(() => {});
+                }
+              }, 2000);
+            }
 
             if (commentaryFrequency > 0) {
               commentaryIntervalRef.current = window.setInterval(() => {
@@ -1927,6 +2086,7 @@ Tool rules:
     void finalizeAnalyticsSession('user_stopped_session');
     shouldStayConnectedRef.current = false;
     isStoppingRef.current = true;
+    lastInjectedBrowserContextPromptRef.current = null;
     clearReconnectTimer();
     cleanupLiveSession({ closeSession: true, stopMic: true });
     setIsRunning(false);
@@ -1993,6 +2153,28 @@ Tool rules:
   const featuredMemorySession = selectedHistorySession || latestHistorySession;
   const featuredMemorySummary = selectedHistorySummary || latestHistorySummary;
   const featuredMemoryMarkdown = stripSessionRecapHeading(featuredMemorySummary?.markdown);
+  const extensionStatus = !extensionBridgeChecked
+    ? 'Checking'
+    : extensionBridgeReady
+      ? 'Connected'
+      : 'Not detected';
+  const canStartCompanion = (!captureRequirements.requiresScreenShare || isSharing)
+    && (!captureRequirements.requiresExtension || extensionBridgeReady);
+  const startButtonLabel = (() => {
+    if (isRunning) {
+      return 'Stop Companion';
+    }
+    if (!configuredApiKey) {
+      return 'Open Settings for Key';
+    }
+    if (captureRequirements.requiresExtension && !extensionBridgeReady) {
+      return extensionBridgeChecked ? 'Reload With Extension' : 'Checking Extension';
+    }
+    if (captureRequirements.requiresScreenShare && !isSharing) {
+      return captureMode === 'multimodal' ? 'Share Screen to Start' : 'Share Tab/Screen';
+    }
+    return 'Start Companion';
+  })();
 
   useEffect(() => {
     if (activeTab !== 'transcript') {
@@ -2098,17 +2280,111 @@ Tool rules:
 	            </div>
 	          </div>
 
-	          <div className="bg-white border border-[#E8E5E0] rounded-xl p-5 space-y-6 shadow-sm">
+		          <div className="bg-white border border-[#E8E5E0] rounded-xl p-5 space-y-6 shadow-sm">
 
-	            {/* Screen Share Preview */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <label className="text-sm font-medium text-stone-700 flex items-center gap-2">
-                  <Monitor className="w-4 h-4 text-stone-400" />
-                  Screen Source
-                </label>
-                <button
-                  onClick={toggleSharing}
+		            <div className="space-y-3">
+		              <label className="text-sm font-medium text-stone-700 flex items-center gap-2">
+		                <Globe className="w-4 h-4 text-stone-400" />
+		                Capture Mode
+		              </label>
+		              <div className="grid grid-cols-1 gap-2">
+		                {CAPTURE_MODES.map((mode) => (
+		                  <button
+		                    key={mode.id}
+		                    type="button"
+		                    onClick={() => setCaptureMode(mode.id)}
+		                    disabled={isRunning}
+		                    className={`rounded-xl border px-4 py-3 text-left transition-colors ${
+		                      captureMode === mode.id
+		                        ? 'border-teal-300 bg-teal-50'
+		                        : 'border-stone-200 bg-white hover:bg-stone-50'
+		                    } ${isRunning ? 'cursor-not-allowed opacity-60' : ''}`}
+		                  >
+		                    <div className="flex items-center justify-between gap-3">
+		                      <div className="text-sm font-medium text-stone-900">{mode.label}</div>
+		                      <div className={`text-[11px] font-semibold uppercase tracking-[0.14em] ${
+		                        captureMode === mode.id ? 'text-teal-700' : 'text-stone-400'
+		                      }`}>
+		                        {captureMode === mode.id ? 'Selected' : 'Available'}
+		                      </div>
+		                    </div>
+		                    <p className="mt-1 text-xs leading-5 text-stone-500">{mode.description}</p>
+		                  </button>
+		                ))}
+		              </div>
+		            </div>
+
+		            <div className="space-y-3 rounded-xl border border-stone-200 bg-stone-50 p-4">
+		              <div className="flex items-center justify-between gap-3">
+		                <div>
+		                  <div className="text-sm font-medium text-stone-800">Chrome Extension Context</div>
+		                  <p className="mt-1 text-xs leading-5 text-stone-500">
+		                    Browser-native URL, nav, headings, forms, and action anchors for multimodal guidance.
+		                  </p>
+		                </div>
+		                <button
+		                  type="button"
+		                  onClick={() => {
+		                    postBrowserBudBridgeRequest('REQUEST_EXTENSION_STATUS');
+		                    postBrowserBudBridgeRequest('REQUEST_ACTIVE_CONTEXT');
+		                  }}
+		                  className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-medium text-stone-600 transition-colors hover:bg-stone-100"
+		                >
+		                  Refresh
+		                </button>
+		              </div>
+		              <div className="flex items-center gap-2">
+		                <span className={`h-2.5 w-2.5 rounded-full ${
+		                  extensionBridgeReady ? 'bg-emerald-500' : extensionBridgeChecked ? 'bg-amber-500' : 'bg-stone-300'
+		                }`} />
+		                <span className="text-xs font-medium uppercase tracking-[0.14em] text-stone-500">
+		                  {extensionStatus}
+		                </span>
+		                {extensionVersion && (
+		                  <span className="text-xs text-stone-400">v{extensionVersion}</span>
+		                )}
+		              </div>
+		              {browserContextPacket ? (
+		                <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+		                  <div className="text-sm font-medium text-stone-900">{browserContextPacket.title}</div>
+		                  <div className="mt-1 break-all text-xs text-teal-700">{browserContextPacket.url}</div>
+		                  <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-stone-500">
+		                    <div className="rounded-lg border border-stone-200 bg-stone-50 px-2 py-2">
+		                      <div className="uppercase tracking-[0.12em] text-stone-400">Section</div>
+		                      <div className="mt-1 font-medium text-stone-700">
+		                        {browserContextPacket.location.activeSection || 'Unknown'}
+		                      </div>
+		                    </div>
+		                    <div className="rounded-lg border border-stone-200 bg-stone-50 px-2 py-2">
+		                      <div className="uppercase tracking-[0.12em] text-stone-400">Headings</div>
+		                      <div className="mt-1 font-medium text-stone-700">{browserContextPacket.contentMap.headings.length}</div>
+		                    </div>
+		                    <div className="rounded-lg border border-stone-200 bg-stone-50 px-2 py-2">
+		                      <div className="uppercase tracking-[0.12em] text-stone-400">Anchors</div>
+		                      <div className="mt-1 font-medium text-stone-700">{browserContextPacket.anchors.length}</div>
+		                    </div>
+		                  </div>
+		                </div>
+		              ) : (
+		                <div className="rounded-xl border border-dashed border-stone-300 bg-white px-4 py-3 text-xs leading-5 text-stone-500">
+		                  {extensionBridgeReady
+		                    ? 'Extension bridge is connected, but no active browser page snapshot has arrived yet.'
+		                    : extensionBridgeChecked
+		                      ? 'Extension not detected in this tab yet. Install it and reload BrowserBud to enable multimodal context.'
+		                      : 'Checking whether the BrowserBud Chrome extension is available in this tab.'}
+		                </div>
+		              )}
+		            </div>
+
+		            {/* Screen Share Preview */}
+	            <div className="space-y-3">
+	              <div className="flex items-center justify-between">
+	                <label className="text-sm font-medium text-stone-700 flex items-center gap-2">
+	                  <Monitor className="w-4 h-4 text-stone-400" />
+	                  {captureRequirements.requiresScreenShare ? 'Screen Source' : 'Screen Source (Optional)'}
+	                </label>
+	                <button
+	                  onClick={toggleSharing}
                   className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${
                     isSharing
                       ? 'bg-rose-50 text-rose-600 hover:bg-rose-100'
@@ -2135,11 +2411,15 @@ Tool rules:
                 />
               </div>
 
-              <div className="flex items-start gap-2 text-xs text-stone-500 bg-stone-50 p-3 rounded-xl border border-stone-200">
-                <Info className="w-4 h-4 shrink-0 text-teal-500" />
-                <p>To have the companion follow you across all tabs, choose <strong>"Entire Screen"</strong> when sharing.</p>
-              </div>
-            </div>
+	              <div className="flex items-start gap-2 text-xs text-stone-500 bg-stone-50 p-3 rounded-xl border border-stone-200">
+	                <Info className="w-4 h-4 shrink-0 text-teal-500" />
+	                <p>
+	                  {captureRequirements.requiresScreenShare
+	                    ? 'To have the companion follow you across all tabs, choose "Entire Screen" when sharing.'
+	                    : 'Screen-share stays available as a parallel visual signal, but this mode can run from the extension context alone.'}
+	                </p>
+	              </div>
+	            </div>
 
             {/* Personality Select & Management */}
             <div className="space-y-3">
@@ -2300,29 +2580,29 @@ Tool rules:
             </div>
 
             {/* Controls */}
-	            <div className="pt-4 border-t border-stone-200 flex gap-3">
-	              <button
-	                onClick={() => {
-	                  if (!configuredApiKey) {
-	                    setShowSettingsPanel(true);
-	                    return;
-	                  }
-	                  toggleRunning();
-	                }}
-	                disabled={!isSharing}
-	                className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-medium transition-all ${
-	                  !isSharing
-	                    ? 'bg-stone-100 text-stone-400 cursor-not-allowed'
-	                    : !configuredApiKey
-	                      ? 'bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200'
-	                      : isRunning
-	                        ? 'bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200'
-	                        : 'bg-teal-600 text-white hover:bg-teal-700 shadow-md shadow-teal-600/15'
-	                }`}
-	              >
-	                {isRunning ? <Square className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
-	                {isRunning ? 'Stop Companion' : configuredApiKey ? 'Start Companion' : 'Open Settings for Key'}
-	              </button>
+		            <div className="pt-4 border-t border-stone-200 flex gap-3">
+		              <button
+		                onClick={() => {
+		                  if (!configuredApiKey) {
+		                    setShowSettingsPanel(true);
+		                    return;
+		                  }
+		                  toggleRunning();
+		                }}
+		                disabled={!isRunning && !configuredApiKey ? false : !isRunning && !canStartCompanion}
+		                className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-medium transition-all ${
+		                  !isRunning && !canStartCompanion
+		                    ? 'bg-stone-100 text-stone-400 cursor-not-allowed'
+		                    : !configuredApiKey
+		                      ? 'bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200'
+		                      : isRunning
+		                        ? 'bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200'
+		                        : 'bg-teal-600 text-white hover:bg-teal-700 shadow-md shadow-teal-600/15'
+		                }`}
+		              >
+		                {isRunning ? <Square className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
+		                {startButtonLabel}
+		              </button>
 
               <button
                 onClick={() => setIsMicMuted(!isMicMuted)}

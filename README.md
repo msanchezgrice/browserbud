@@ -33,3 +33,20 @@ Browserbud now supports a local-first analytics companion backed by SQLite.
 By default the UI posts analytics events to `http://127.0.0.1:3011/api/analytics` when BrowserBud is running locally.
 In production, the app uses same-origin `/api/analytics` routes and falls back to browser-local history if the shared backend is unavailable.
 Set `BROWSERBUD_DATABASE_URL`, `POSTGRES_URL`, or `DATABASE_URL` to back those routes with Postgres. `BROWSERBUD_LOCAL_API_URL` still overrides the client endpoint in either environment.
+
+## Chrome Extension (Multimodal Context)
+
+The first BrowserBud extension lives in [`extension/`](/Users/miguel/Browserbud/extension).
+
+To load it in Chrome:
+
+1. Open `chrome://extensions`
+2. Enable Developer mode
+3. Click `Load unpacked`
+4. Select the `extension/` folder
+5. Reload the BrowserBud app tab
+
+Once loaded, BrowserBud can combine:
+
+- screen-share context
+- browser-native page context like URL, nav, headings, forms, and visible anchors
