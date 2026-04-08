@@ -317,6 +317,50 @@ function postReady(version) {
   });
 }
 
+function postInvalidated(reason) {
+  postToBrowserBudPage({
+    source: 'browserbud-extension',
+    type: 'BROWSERBUD_EXTENSION_INVALIDATED',
+    payload: {
+      reason: reason || 'Extension context invalidated. Reload BrowserBud and the browsing tab.',
+    },
+  });
+}
+
+function safeRuntimeSendMessage(message, callback) {
+  try {
+    if (!chrome?.runtime?.id) {
+      postInvalidated('Extension context invalidated. Reload BrowserBud and the browsing tab.');
+      if (typeof callback === 'function') {
+        callback(null);
+      }
+      return;
+    }
+
+    chrome.runtime.sendMessage(message, (response) => {
+      const lastError = chrome.runtime?.lastError;
+      if (lastError) {
+        if (/context invalidated|Receiving end does not exist|message port closed/i.test(lastError.message || '')) {
+          postInvalidated(lastError.message || 'Extension context invalidated. Reload BrowserBud and the browsing tab.');
+        }
+        if (typeof callback === 'function') {
+          callback(null);
+        }
+        return;
+      }
+
+      if (typeof callback === 'function') {
+        callback(response);
+      }
+    });
+  } catch (error) {
+    postInvalidated(error instanceof Error ? error.message : 'Extension context invalidated. Reload BrowserBud and the browsing tab.');
+    if (typeof callback === 'function') {
+      callback(null);
+    }
+  }
+}
+
 function removeHelpfulOverlay() {
   document.getElementById(OVERLAY_ELEMENT_ID)?.remove();
 }
@@ -534,7 +578,7 @@ function renderHelpfulOverlay(text) {
 }
 
 if (isBrowserBudPage) {
-  chrome.runtime.sendMessage({ type: 'BROWSERBUD_REQUEST_EXTENSION_STATUS' }, (response) => {
+  safeRuntimeSendMessage({ type: 'BROWSERBUD_REQUEST_EXTENSION_STATUS' }, (response) => {
     postReady(response?.version || 'unknown');
   });
 
@@ -549,14 +593,14 @@ if (isBrowserBudPage) {
     }
 
     if (message.type === 'BROWSERBUD_REQUEST_EXTENSION_STATUS') {
-      chrome.runtime.sendMessage({ type: 'BROWSERBUD_REQUEST_EXTENSION_STATUS' }, (response) => {
+      safeRuntimeSendMessage({ type: 'BROWSERBUD_REQUEST_EXTENSION_STATUS' }, (response) => {
         postReady(response?.version || 'unknown');
       });
       return;
     }
 
     if (message.type === 'BROWSERBUD_REQUEST_ACTIVE_CONTEXT') {
-      chrome.runtime.sendMessage({ type: 'BROWSERBUD_REQUEST_ACTIVE_CONTEXT' }, (response) => {
+      safeRuntimeSendMessage({ type: 'BROWSERBUD_REQUEST_ACTIVE_CONTEXT' }, (response) => {
         if (response?.packet) {
           postToBrowserBudPage({
             source: 'browserbud-extension',
@@ -569,7 +613,7 @@ if (isBrowserBudPage) {
     }
 
     if (message.type === 'BROWSERBUD_REQUEST_PAGE_RESOURCE') {
-      chrome.runtime.sendMessage({
+      safeRuntimeSendMessage({
         type: 'BROWSERBUD_REQUEST_PAGE_RESOURCE',
         requestId: message.payload?.requestId,
         url: message.payload?.url,
@@ -590,7 +634,7 @@ if (isBrowserBudPage) {
     }
 
     if (message.type === 'BROWSERBUD_SET_HELPFUL_OVERLAY') {
-      chrome.runtime.sendMessage({
+      safeRuntimeSendMessage({
         type: 'BROWSERBUD_SET_HELPFUL_OVERLAY',
         text: typeof message.payload?.text === 'string' ? message.payload.text : '',
         title: typeof message.payload?.title === 'string' ? message.payload.title : '',
@@ -601,7 +645,7 @@ if (isBrowserBudPage) {
     }
 
     if (message.type === 'BROWSERBUD_HIGHLIGHT_PAGE_ELEMENT') {
-      chrome.runtime.sendMessage({
+      safeRuntimeSendMessage({
         type: 'BROWSERBUD_HIGHLIGHT_TARGET',
         requestId: message.payload?.requestId,
         anchorId: typeof message.payload?.anchorId === 'string' ? message.payload.anchorId : '',

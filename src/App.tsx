@@ -44,7 +44,7 @@ const DEV_DEFAULT_API_KEY = process.env.BROWSERBUD_DEV_DEFAULT_API_KEY || '';
 const TIMED_HELPFUL_INFO_MODEL = 'gemini-2.5-flash';
 const PAGE_INSIGHT_MODEL = 'gemini-2.5-flash';
 const PAGE_INSIGHT_CHUNK_SIZE = 12000;
-const ELEMENT_HIGHLIGHTING_DEFAULT_ENABLED = process.env.BROWSERBUD_ENABLE_ELEMENT_HIGHLIGHT === 'true';
+const ELEMENT_HIGHLIGHTING_DEFAULT_ENABLED = process.env.BROWSERBUD_ENABLE_ELEMENT_HIGHLIGHT !== 'false';
 
 const STORAGE_KEYS = {
   customPersonas: 'browserbud.customPersonas',
@@ -53,7 +53,7 @@ const STORAGE_KEYS = {
   savedNotes: 'browserbud.savedNotes',
   transcriptLogs: 'browserbud.transcriptLogs',
   modelInputPreview: 'browserbud.modelInputPreview',
-  elementHighlightingEnabled: 'browserbud.flags.elementHighlightingEnabled',
+  elementHighlightingEnabled: 'browserbud.flags.elementHighlightingEnabled.v2',
 };
 
 const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
@@ -540,6 +540,7 @@ export default function App() {
   const [extensionBridgeReady, setExtensionBridgeReady] = useState(false);
   const [extensionBridgeChecked, setExtensionBridgeChecked] = useState(false);
   const [extensionVersion, setExtensionVersion] = useState<string | null>(null);
+  const [extensionBridgeIssue, setExtensionBridgeIssue] = useState<string | null>(null);
   const [browserContextPacket, setBrowserContextPacket] = useState<BrowserContextPacket | null>(null);
   const [pageInsight, setPageInsight] = useState<PageInsight | null>(null);
   const [pageInsightStatus, setPageInsightStatus] = useState<PageInsightStatus>('idle');
@@ -678,6 +679,13 @@ export default function App() {
       if (event.kind === 'ready') {
         setExtensionBridgeReady(true);
         setExtensionVersion(event.version);
+        setExtensionBridgeIssue(null);
+        return;
+      }
+
+      if (event.kind === 'invalidated') {
+        setExtensionBridgeReady(false);
+        setExtensionBridgeIssue(event.reason);
         return;
       }
 
@@ -3528,6 +3536,11 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
 		                  <span className="text-xs text-stone-400">v{extensionVersion}</span>
 		                )}
 		              </div>
+                  {extensionBridgeIssue && (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+                      {extensionBridgeIssue}
+                    </div>
+                  )}
 		              {browserContextPacket ? (
 		                <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
 		                  <div className="text-sm font-medium text-stone-900">{browserContextPacket.title}</div>

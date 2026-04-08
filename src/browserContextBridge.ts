@@ -33,6 +33,14 @@ type BrowserBudBridgeReadyMessage = {
   };
 };
 
+type BrowserBudBridgeInvalidatedMessage = {
+  source: 'browserbud-extension';
+  type: 'BROWSERBUD_EXTENSION_INVALIDATED';
+  payload?: {
+    reason?: string;
+  };
+};
+
 type BrowserBudBridgePacketMessage = {
   source: 'browserbud-extension';
   type: 'BROWSERBUD_CONTEXT_PACKET';
@@ -75,6 +83,7 @@ type BrowserBudBridgeHighlightMessage = {
 
 export type BrowserBudBridgeEvent =
   | { kind: 'ready'; version: string }
+  | { kind: 'invalidated'; reason: string }
   | { kind: 'packet'; packet: BrowserContextPacket }
   | { kind: 'resource'; response: BrowserBudPageResourceResponse }
   | { kind: 'highlight'; response: BrowserBudHighlightResponse };
@@ -111,6 +120,18 @@ export function parseBrowserBudBridgeMessage(value: unknown): BrowserBudBridgeEv
     return {
       kind: 'ready',
       version: typeof payload?.version === 'string' ? payload.version : 'unknown',
+    };
+  }
+
+  if (message.type === 'BROWSERBUD_EXTENSION_INVALIDATED') {
+    const payload = message.payload && typeof message.payload === 'object'
+      ? message.payload as BrowserBudBridgeInvalidatedMessage['payload']
+      : null;
+    return {
+      kind: 'invalidated',
+      reason: typeof payload?.reason === 'string'
+        ? payload.reason
+        : 'Extension context invalidated. Reload BrowserBud and the browsing tab.',
     };
   }
 

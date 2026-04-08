@@ -112,6 +112,15 @@ test('parseBrowserBudBridgeMessage recognizes extension ready and context packet
 
   assert.deepEqual(parseBrowserBudBridgeMessage({
     source: 'browserbud-extension',
+    type: 'BROWSERBUD_EXTENSION_INVALIDATED',
+    payload: { reason: 'Reload this tab.' },
+  }), {
+    kind: 'invalidated',
+    reason: 'Reload this tab.',
+  });
+
+  assert.deepEqual(parseBrowserBudBridgeMessage({
+    source: 'browserbud-extension',
     type: 'BROWSERBUD_CONTEXT_PACKET',
     payload: packet,
   }), {

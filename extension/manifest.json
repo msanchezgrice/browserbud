@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "BrowserBud Context Bridge",
   "description": "Adds browser-native page context to BrowserBud for multimodal guidance.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "permissions": [
     "activeTab",
     "storage",
