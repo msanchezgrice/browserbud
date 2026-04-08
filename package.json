@@ -12,7 +12,7 @@
     "lint": "tsc --noEmit",
     "probe:live": "node scripts/live-probe.mjs",
     "probe:browser": "node scripts/playwright-live-smoke.mjs",
-    "test:live-utils": "tsx --test tests/liveUtils.test.ts tests/autoSave.test.ts tests/runtimeSupport.test.ts tests/clientConfig.test.ts tests/appSurface.test.ts tests/localHistory.test.ts tests/browserContext.test.ts tests/browserContextBridge.test.ts",
+    "test:live-utils": "tsx --test tests/liveUtils.test.ts tests/autoSave.test.ts tests/runtimeSupport.test.ts tests/clientConfig.test.ts tests/appSurface.test.ts tests/localHistory.test.ts tests/browserContext.test.ts tests/browserContextBridge.test.ts tests/pageInsights.test.ts",
     "test:analytics": "tsx --test tests/analyticsStore.test.ts tests/analyticsApp.test.ts tests/analyticsWebHandlers.test.ts"
   },
   "dependencies": {

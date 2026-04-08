@@ -15,6 +15,7 @@ import {
   isSignificantBrowserContextUpdate,
   readDocumentTextChunk,
   searchBrowserContextDocument,
+  splitDocumentTextIntoChunks,
   type BrowserContextPacket,
   type CaptureMode,
 } from './browserContext';
@@ -29,11 +30,20 @@ import {
 } from './currentPageDocument';
 import { buildRehydratedSessionState, buildTranscriptFeed, formatActivityLogEntry, formatLatency, mergeIncrementalTranscript, parseStoredLogEntries, serializeLogEntries, shouldCommitUserTranscript, shouldRunTimedBackgroundSave, truncateSessionHandle } from './liveUtils';
 import { buildLocalSessionRecapSummary, getLatestStoredAnalyticsSessionTimeline, getStoredAnalyticsSessionTimeline, listStoredAnalyticsSessions, upsertStoredAnalyticsTimeline } from './localAnalyticsHistory';
+import {
+  buildPageInsightContextPrompt,
+  buildPageInsightFingerprint,
+  getStoredPageInsight,
+  upsertStoredPageInsight,
+  type PageInsight,
+} from './pageInsights';
 import { getRuntimeSupport } from './runtimeSupport';
 
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
 const DEV_DEFAULT_API_KEY = process.env.BROWSERBUD_DEV_DEFAULT_API_KEY || '';
 const TIMED_HELPFUL_INFO_MODEL = 'gemini-2.5-flash';
+const PAGE_INSIGHT_MODEL = 'gemini-2.5-flash';
+const PAGE_INSIGHT_CHUNK_SIZE = 12000;
 
 const STORAGE_KEYS = {
   customPersonas: 'browserbud.customPersonas',
@@ -134,6 +144,7 @@ const CAPTURE_MODES: Array<{
 ];
 
 type AppTab = AppTabRoute;
+type PageInsightStatus = 'idle' | 'warming' | 'ready' | 'error';
 
 type LogEntry = {
   id: string;
@@ -359,6 +370,9 @@ export default function App() {
   const [extensionBridgeChecked, setExtensionBridgeChecked] = useState(false);
   const [extensionVersion, setExtensionVersion] = useState<string | null>(null);
   const [browserContextPacket, setBrowserContextPacket] = useState<BrowserContextPacket | null>(null);
+  const [pageInsight, setPageInsight] = useState<PageInsight | null>(null);
+  const [pageInsightStatus, setPageInsightStatus] = useState<PageInsightStatus>('idle');
+  const [pageInsightError, setPageInsightError] = useState<string | null>(null);
   const [newPersonaName, setNewPersonaName] = useState('');
   const [newPersonaPrompt, setNewPersonaPrompt] = useState('');
   const [newPersonaVoice, setNewPersonaVoice] = useState(AVAILABLE_VOICES[0]);
@@ -422,6 +436,9 @@ export default function App() {
   const previousBrowserContextRef = useRef<BrowserContextPacket | null>(null);
   const lastInjectedBrowserContextPromptRef = useRef<string | null>(null);
   const currentPageDocumentCacheRef = useRef<Map<string, CurrentPageDocument>>(new Map());
+  const latestPageInsightRef = useRef<PageInsight | null>(null);
+  const lastInjectedPageInsightFingerprintRef = useRef<string | null>(null);
+  const pageInsightWarmFingerprintRef = useRef<string | null>(null);
   
   // Interval Refs
   const videoIntervalRef = useRef<number | null>(null);
@@ -458,6 +475,10 @@ export default function App() {
   useEffect(() => {
     latestBrowserContextRef.current = browserContextPacket;
   }, [browserContextPacket]);
+
+  useEffect(() => {
+    latestPageInsightRef.current = pageInsight;
+  }, [pageInsight]);
 
   useEffect(() => {
     const markCheckedTimer = window.setTimeout(() => {
@@ -541,6 +562,111 @@ export default function App() {
     lastInjectedBrowserContextPromptRef.current = contextPrompt;
     sendSessionPrompt(contextPrompt, { suppressOutput: true });
   }, [browserContextPacket, isRunning]);
+
+  useEffect(() => {
+    if (!browserContextPacket) {
+      setPageInsight(null);
+      setPageInsightStatus('idle');
+      setPageInsightError(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const warmInsight = async () => {
+      const packet = browserContextPacket;
+      const document = await getCurrentPageDocument();
+      if (cancelled || !document) {
+        if (!cancelled) {
+          setPageInsight(null);
+          setPageInsightStatus('idle');
+          setPageInsightError(null);
+        }
+        return;
+      }
+
+      const fingerprint = buildPageInsightFingerprint(document);
+      const cached = getStoredPageInsight(getSafeLocalStorage(), packet.url, fingerprint);
+      if (cached) {
+        if (!cancelled) {
+          setPageInsight(cached);
+          setPageInsightStatus('ready');
+          setPageInsightError(null);
+        }
+        return;
+      }
+
+      if (!configuredApiKey) {
+        if (!cancelled) {
+          setPageInsight(null);
+          setPageInsightStatus('idle');
+          setPageInsightError(null);
+        }
+        return;
+      }
+
+      if (pageInsightWarmFingerprintRef.current === fingerprint) {
+        if (!cancelled) {
+          setPageInsightStatus('warming');
+        }
+        return;
+      }
+
+      pageInsightWarmFingerprintRef.current = fingerprint;
+      if (!cancelled) {
+        setPageInsight(null);
+        setPageInsightStatus('warming');
+        setPageInsightError(null);
+      }
+
+      try {
+        const insight = await generatePageInsight(packet, document);
+        if (cancelled) {
+          return;
+        }
+
+        upsertStoredPageInsight(getSafeLocalStorage(), insight);
+        setPageInsight(insight);
+        setPageInsightStatus('ready');
+        setPageInsightError(null);
+      } catch (error) {
+        console.error('Background page analysis failed', error);
+        if (!cancelled) {
+          setPageInsight(null);
+          setPageInsightStatus('error');
+          setPageInsightError(error instanceof Error ? error.message : 'Background page analysis failed.');
+        }
+      } finally {
+        if (pageInsightWarmFingerprintRef.current === fingerprint) {
+          pageInsightWarmFingerprintRef.current = null;
+        }
+      }
+    };
+
+    void warmInsight();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    browserContextPacket?.url,
+    browserContextPacket?.page.hash,
+    browserContextPacket?.page.documentTextLength,
+    configuredApiKey,
+  ]);
+
+  useEffect(() => {
+    if (!isRunning || !pageInsight) {
+      return;
+    }
+
+    if (lastInjectedPageInsightFingerprintRef.current === pageInsight.documentFingerprint) {
+      return;
+    }
+
+    lastInjectedPageInsightFingerprintRef.current = pageInsight.documentFingerprint;
+    sendSessionPrompt(buildPageInsightContextPrompt(pageInsight), { suppressOutput: true });
+  }, [isRunning, pageInsight]);
 
   useEffect(() => {
     if (!showSettingsPanel) {
@@ -1324,6 +1450,175 @@ export default function App() {
     return resolved;
   };
 
+  const generatePageInsight = async (
+    packet: BrowserContextPacket,
+    document: CurrentPageDocument,
+  ): Promise<PageInsight> => {
+    const aiClient = new GoogleGenAI({ apiKey: configuredApiKey });
+    const chunkTexts = splitDocumentTextIntoChunks(document.text, PAGE_INSIGHT_CHUNK_SIZE);
+    const cappedChunkTexts = chunkTexts.slice(0, 24);
+    const chunkSummaries: string[] = [];
+
+    for (let index = 0; index < cappedChunkTexts.length; index += 1) {
+      const response = await aiClient.models.generateContent({
+        model: PAGE_INSIGHT_MODEL,
+        contents: [{
+          role: 'user',
+          parts: [{
+            text: [
+              'You are preparing background browsing intelligence for BrowserBud.',
+              `Current URL: ${packet.url}`,
+              `Page title: ${packet.title}`,
+              `Chunk ${index + 1} of ${cappedChunkTexts.length}.`,
+              'Summarize the most important information from this chunk for later user assistance.',
+              'Focus on what the page/document is about, notable facts, navigation cues, and anything likely to matter if the user asks a question later.',
+              'Return JSON with: summary (string), keyPoints (array of short strings).',
+              '',
+              cappedChunkTexts[index],
+            ].join('\n'),
+          }],
+        }],
+        config: {
+          temperature: 0.2,
+          maxOutputTokens: 260,
+          responseMimeType: 'application/json',
+          responseJsonSchema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              summary: { type: 'string' },
+              keyPoints: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+            },
+            required: ['summary'],
+          },
+        },
+      });
+
+      let parsed: { summary?: string; keyPoints?: string[] } | null = null;
+      try {
+        parsed = response.text ? JSON.parse(response.text) as { summary?: string; keyPoints?: string[] } : null;
+      } catch {
+        parsed = null;
+      }
+
+      const summary = typeof parsed?.summary === 'string' && parsed.summary.trim()
+        ? parsed.summary.trim()
+        : response.text?.trim();
+      const keyPoints = Array.isArray(parsed?.keyPoints)
+        ? parsed!.keyPoints.filter((point): point is string => typeof point === 'string' && point.trim().length > 0)
+        : [];
+
+      if (summary) {
+        chunkSummaries.push([
+          `Chunk ${index + 1}: ${summary}`,
+          ...keyPoints.slice(0, 4).map((point) => `- ${point}`),
+        ].join('\n'));
+      }
+    }
+
+    const headings = packet.contentMap.headings.slice(0, 8).map((heading) => heading.text).join(' | ');
+    const anchors = packet.anchors.slice(0, 8).map((anchor) => anchor.name).join(' | ');
+    const finalResponse = await aiClient.models.generateContent({
+      model: PAGE_INSIGHT_MODEL,
+      contents: [{
+        role: 'user',
+        parts: [{
+          text: [
+            'You are preparing cached page intelligence for BrowserBud.',
+            `Current URL: ${packet.url}`,
+            `Page title: ${packet.title}`,
+            `Content type: ${document.contentType || 'unknown'}`,
+            `Document length: ${document.documentTextLength} characters`,
+            headings ? `Top headings: ${headings}` : '',
+            anchors ? `Action anchors: ${anchors}` : '',
+            document.chunkCount > cappedChunkTexts.length
+              ? `This summary was prepared from ${cappedChunkTexts.length} large chunks out of ${document.chunkCount} total chunks.`
+              : `This summary was prepared from ${cappedChunkTexts.length} chunks.`,
+            'Create JSON with: summary (string), pageKind (string), keyPoints (array of short strings), likelyUserGoals (array of short strings), navigationTips (array of short strings).',
+            'Optimize for helping the user navigate, understand, and answer questions about this page later.',
+            '',
+            chunkSummaries.join('\n\n'),
+          ].filter(Boolean).join('\n'),
+        }],
+      }],
+      config: {
+        temperature: 0.2,
+        maxOutputTokens: 420,
+        responseMimeType: 'application/json',
+        responseJsonSchema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            summary: { type: 'string' },
+            pageKind: { type: 'string' },
+            keyPoints: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            likelyUserGoals: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            navigationTips: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+          },
+          required: ['summary'],
+        },
+      },
+    });
+
+    let parsed: {
+      summary?: string;
+      pageKind?: string;
+      keyPoints?: string[];
+      likelyUserGoals?: string[];
+      navigationTips?: string[];
+    } | null = null;
+    try {
+      parsed = finalResponse.text ? JSON.parse(finalResponse.text) as {
+        summary?: string;
+        pageKind?: string;
+        keyPoints?: string[];
+        likelyUserGoals?: string[];
+        navigationTips?: string[];
+      } : null;
+    } catch {
+      parsed = null;
+    }
+
+    const cleanList = (values?: string[]) => (
+      Array.isArray(values)
+        ? values
+          .filter((value): value is string => typeof value === 'string')
+          .map((value) => value.trim())
+          .filter(Boolean)
+          .slice(0, 5)
+        : []
+    );
+
+    return {
+      url: packet.url,
+      title: packet.title,
+      generatedAt: new Date().toISOString(),
+      documentFingerprint: buildPageInsightFingerprint(document),
+      documentTextLength: document.documentTextLength,
+      contentType: document.contentType,
+      source: document.source,
+      pageKind: typeof parsed?.pageKind === 'string' && parsed.pageKind.trim() ? parsed.pageKind.trim() : null,
+      summary: typeof parsed?.summary === 'string' && parsed.summary.trim()
+        ? parsed.summary.trim()
+        : (finalResponse.text?.trim() || chunkSummaries[0] || 'Prepared page analysis is available.'),
+      keyPoints: cleanList(parsed?.keyPoints),
+      likelyUserGoals: cleanList(parsed?.likelyUserGoals),
+      navigationTips: cleanList(parsed?.navigationTips),
+    };
+  };
+
   const maybeTriggerTimedHelpfulInfoSave = async () => {
     if (!shouldRunTimedBackgroundSave({
       frequencyMs: frequency,
@@ -1341,6 +1636,7 @@ export default function App() {
 
     const frameBase64 = captureFrame();
     const browserContext = latestBrowserContextRef.current;
+    const preparedInsight = latestPageInsightRef.current;
     if ((!frameBase64 && !browserContext) || !configuredApiKey || timedHelpfulInfoSaveInFlightRef.current) {
       return;
     }
@@ -1367,6 +1663,11 @@ export default function App() {
       if (browserContext) {
         parts.push({
           text: `Browser context snapshot:\n${buildBrowserContextPrompt(browserContext)}`,
+        });
+      }
+      if (preparedInsight) {
+        parts.push({
+          text: `Prepared page analysis:\n${buildPageInsightContextPrompt(preparedInsight)}`,
         });
       }
       parts.push({
@@ -2138,6 +2439,14 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                         response: {
                           ...snapshot,
                           fullDocumentAvailable: Boolean(document),
+                          preparedInsight: latestPageInsightRef.current
+                            ? {
+                              summary: latestPageInsightRef.current.summary,
+                              keyPoints: latestPageInsightRef.current.keyPoints,
+                              likelyUserGoals: latestPageInsightRef.current.likelyUserGoals,
+                              navigationTips: latestPageInsightRef.current.navigationTips,
+                            }
+                            : null,
                           ...(document ? buildCurrentPageToolResult(document) : {}),
                         },
                       });
@@ -2349,6 +2658,13 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
     : extensionBridgeReady
       ? 'Connected'
       : 'Not detected';
+  const pageInsightStatusLabel = pageInsightStatus === 'warming'
+    ? 'Preparing'
+    : pageInsightStatus === 'ready'
+      ? 'Ready'
+      : pageInsightStatus === 'error'
+        ? 'Retry Needed'
+        : 'Idle';
   const canStartCompanion = (!captureRequirements.requiresScreenShare || isSharing)
     && (!captureRequirements.requiresExtension || extensionBridgeReady);
   const startButtonLabel = (() => {
@@ -2565,6 +2881,52 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
 		                      : 'Checking whether the BrowserBud Chrome extension is available in this tab.'}
 		                </div>
 		              )}
+		              <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+		                <div className="flex items-center justify-between gap-3">
+		                  <div>
+		                    <div className="text-sm font-medium text-stone-900">Prepared Page Analysis</div>
+		                    <p className="mt-1 text-xs leading-5 text-stone-500">
+		                      BrowserBud warms a deeper page summary and navigation hints in the background for the current page or PDF.
+		                    </p>
+		                  </div>
+		                  <div className={`rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] ${
+		                    pageInsightStatus === 'ready'
+		                      ? 'bg-emerald-50 text-emerald-700'
+		                      : pageInsightStatus === 'warming'
+		                        ? 'bg-amber-50 text-amber-700'
+		                        : pageInsightStatus === 'error'
+		                          ? 'bg-rose-50 text-rose-700'
+		                          : 'bg-stone-100 text-stone-500'
+		                  }`}>
+		                    {pageInsightStatusLabel}
+		                  </div>
+		                </div>
+		                {pageInsight ? (
+		                  <div className="mt-3 space-y-3 text-xs text-stone-600">
+		                    <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 leading-5 text-stone-700">
+		                      {pageInsight.summary}
+		                    </div>
+		                    {pageInsight.navigationTips.length > 0 && (
+		                      <div>
+		                        <div className="uppercase tracking-[0.12em] text-stone-400">Navigation help</div>
+		                        <div className="mt-1 leading-5 text-stone-600">
+		                          {pageInsight.navigationTips.slice(0, 2).join(' | ')}
+		                        </div>
+		                      </div>
+		                    )}
+		                  </div>
+		                ) : (
+		                  <div className="mt-3 text-xs leading-5 text-stone-500">
+		                    {pageInsightStatus === 'warming'
+		                      ? 'BrowserBud is reading and preparing the current page in the background.'
+		                      : pageInsightStatus === 'error'
+		                        ? pageInsightError || 'Background page analysis failed for this page.'
+		                        : configuredApiKey
+		                          ? 'Open a page or PDF with extension context enabled to warm a reusable summary.'
+		                          : 'Add your Gemini key to enable background page analysis.'}
+		                  </div>
+		                )}
+		              </div>
 		            </div>
 
 		            {/* Screen Share Preview */}
