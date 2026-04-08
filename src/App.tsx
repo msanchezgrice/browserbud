@@ -44,6 +44,7 @@ const DEV_DEFAULT_API_KEY = process.env.BROWSERBUD_DEV_DEFAULT_API_KEY || '';
 const TIMED_HELPFUL_INFO_MODEL = 'gemini-2.5-flash';
 const PAGE_INSIGHT_MODEL = 'gemini-2.5-flash';
 const PAGE_INSIGHT_CHUNK_SIZE = 12000;
+const REQUIRED_EXTENSION_VERSION = '0.4.1';
 const ELEMENT_HIGHLIGHTING_DEFAULT_ENABLED = process.env.BROWSERBUD_ENABLE_ELEMENT_HIGHLIGHT !== 'false';
 
 const STORAGE_KEYS = {
@@ -357,6 +358,35 @@ function cleanInlineText(value?: string | null): string {
   return (value || '').trim();
 }
 
+function parseVersionParts(version?: string | null): number[] {
+  return cleanInlineText(version)
+    .split('.')
+    .map((part) => Number.parseInt(part, 10))
+    .map((value) => (Number.isFinite(value) ? value : 0))
+    .slice(0, 3);
+}
+
+function compareVersions(left?: string | null, right?: string | null): number {
+  const leftParts = parseVersionParts(left);
+  const rightParts = parseVersionParts(right);
+  const length = Math.max(leftParts.length, rightParts.length, 3);
+  for (let index = 0; index < length; index += 1) {
+    const leftValue = leftParts[index] ?? 0;
+    const rightValue = rightParts[index] ?? 0;
+    if (leftValue !== rightValue) {
+      return leftValue - rightValue;
+    }
+  }
+  return 0;
+}
+
+function isRequiredExtensionVersion(version?: string | null): boolean {
+  if (!cleanInlineText(version)) {
+    return false;
+  }
+  return compareVersions(version, REQUIRED_EXTENSION_VERSION) >= 0;
+}
+
 function truncateInlineText(value: string, maxLength = 220): string {
   if (value.length <= maxLength) {
     return value;
@@ -541,6 +571,7 @@ export default function App() {
   const [extensionBridgeChecked, setExtensionBridgeChecked] = useState(false);
   const [extensionVersion, setExtensionVersion] = useState<string | null>(null);
   const [extensionBridgeIssue, setExtensionBridgeIssue] = useState<string | null>(null);
+  const [extensionDiagnosticsMessage, setExtensionDiagnosticsMessage] = useState<string | null>(null);
   const [browserContextPacket, setBrowserContextPacket] = useState<BrowserContextPacket | null>(null);
   const [pageInsight, setPageInsight] = useState<PageInsight | null>(null);
   const [pageInsightStatus, setPageInsightStatus] = useState<PageInsightStatus>('idle');
@@ -570,6 +601,8 @@ export default function App() {
   const configuredApiKey = userApiKey.trim();
   const historySurfaceOpen = activeTab === 'history' || activeTab === 'memory';
   const captureRequirements = getCaptureModeRequirements(captureMode);
+  const extensionSupportsAdvancedFeatures = extensionBridgeReady && isRequiredExtensionVersion(extensionVersion);
+  const extensionNeedsUpgrade = extensionBridgeReady && !extensionSupportsAdvancedFeatures;
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -680,12 +713,14 @@ export default function App() {
         setExtensionBridgeReady(true);
         setExtensionVersion(event.version);
         setExtensionBridgeIssue(null);
+        setExtensionDiagnosticsMessage(null);
         return;
       }
 
       if (event.kind === 'invalidated') {
         setExtensionBridgeReady(false);
         setExtensionBridgeIssue(event.reason);
+        setExtensionDiagnosticsMessage(null);
         return;
       }
 
@@ -797,6 +832,13 @@ export default function App() {
       return;
     }
 
+    if (extensionNeedsUpgrade) {
+      setPageInsight(null);
+      setPageInsightStatus('error');
+      setPageInsightError(`Update the BrowserBud Chrome extension to v${REQUIRED_EXTENSION_VERSION}+ and reload BrowserBud plus the browsing tab.`);
+      return;
+    }
+
     let cancelled = false;
 
     const warmInsight = async () => {
@@ -879,6 +921,7 @@ export default function App() {
     browserContextPacket?.page.hash,
     browserContextPacket?.page.documentTextLength,
     configuredApiKey,
+    extensionNeedsUpgrade,
   ]);
 
   useEffect(() => {
@@ -1318,7 +1361,7 @@ export default function App() {
   };
 
   const postHelpfulOverlay = (text: string, title?: string | null, visible = true) => {
-    if (!extensionBridgeReady) {
+    if (!extensionSupportsAdvancedFeatures) {
       return;
     }
 
@@ -1339,6 +1382,66 @@ export default function App() {
       url: cleanInlineText(packet?.url) || '',
       visible,
     });
+  };
+
+  const runOverlayDiagnostic = (visible = true) => {
+    if (!extensionBridgeReady) {
+      setExtensionDiagnosticsMessage('Extension not detected. Install or reload the BrowserBud extension first.');
+      return;
+    }
+
+    if (!extensionSupportsAdvancedFeatures) {
+      setExtensionDiagnosticsMessage(`Installed extension is too old. Overlay, page warming, and highlighting require v${REQUIRED_EXTENSION_VERSION}+.`);
+      return;
+    }
+
+    if (!visible) {
+      postHelpfulOverlay('', null, false);
+      setExtensionDiagnosticsMessage('Overlay clear request sent to the current browsing tab.');
+      return;
+    }
+
+    const packet = latestBrowserContextRef.current;
+    postHelpfulOverlay(
+      'BrowserBud overlay test. If the extension is connected to the current browsing tab, you should see this text floating on that page.',
+      packet?.title || 'BrowserBud overlay test',
+    );
+    setExtensionDiagnosticsMessage('Overlay test sent. Check the actual browsing tab, not the BrowserBud app tab.');
+  };
+
+  const runHighlightDiagnostic = async () => {
+    if (!extensionBridgeReady) {
+      setExtensionDiagnosticsMessage('Extension not detected. Install or reload the BrowserBud extension first.');
+      return;
+    }
+
+    if (!extensionSupportsAdvancedFeatures) {
+      setExtensionDiagnosticsMessage(`Installed extension is too old. Overlay, page warming, and highlighting require v${REQUIRED_EXTENSION_VERSION}+.`);
+      return;
+    }
+
+    const packet = latestBrowserContextRef.current;
+    const target = packet?.anchors.find((anchor) => anchor.visible && anchor.interactable) || packet?.anchors[0];
+    if (!packet || !target) {
+      setExtensionDiagnosticsMessage('No visible page anchors are available yet. Open the target browsing tab, then press Refresh in Chrome Extension Context.');
+      return;
+    }
+
+    const response = await requestBrowserBudElementHighlight({
+      anchorId: target.anchorId,
+      name: target.name,
+      role: target.role,
+      nearbyHeading: target.nearbyHeading || '',
+      selectorHints: target.selectorHints,
+      scrollIntoView: true,
+    });
+
+    if (response?.ok) {
+      setExtensionDiagnosticsMessage(`Highlight test succeeded on ${response.matchedName || response.matchedRole || 'the current element'}.`);
+      return;
+    }
+
+    setExtensionDiagnosticsMessage(response?.error || 'Highlight test failed. Reload the browsing tab so the fresh content script is attached.');
   };
 
   const recordAnalyticsEventSafe = (
@@ -3082,6 +3185,17 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                         continue;
                       }
 
+                      if (!extensionSupportsAdvancedFeatures) {
+                        functionResponses.push({
+                          id: call.id,
+                          name: call.name,
+                          response: {
+                            error: `Element highlighting requires BrowserBud extension v${REQUIRED_EXTENSION_VERSION}+ on the browsing tab.`,
+                          },
+                        });
+                        continue;
+                      }
+
                       const response = await requestBrowserBudElementHighlight({
                         anchorId: typeof args?.anchorId === 'string' ? args.anchorId : '',
                         name: typeof args?.name === 'string' ? args.name : '',
@@ -3265,6 +3379,8 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
   const featuredMemoryMarkdown = stripSessionRecapHeading(featuredMemorySummary?.markdown);
   const extensionStatus = !extensionBridgeChecked
     ? 'Checking'
+    : extensionNeedsUpgrade
+      ? 'Update needed'
     : extensionBridgeReady
       ? 'Connected'
       : 'Not detected';
@@ -3527,7 +3643,13 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
 		              </div>
 		              <div className="flex items-center gap-2">
 		                <span className={`h-2.5 w-2.5 rounded-full ${
-		                  extensionBridgeReady ? 'bg-emerald-500' : extensionBridgeChecked ? 'bg-amber-500' : 'bg-stone-300'
+		                  extensionNeedsUpgrade
+		                    ? 'bg-rose-500'
+		                    : extensionBridgeReady
+		                      ? 'bg-emerald-500'
+		                      : extensionBridgeChecked
+		                        ? 'bg-amber-500'
+		                        : 'bg-stone-300'
 		                }`} />
 		                <span className="text-xs font-medium uppercase tracking-[0.14em] text-stone-500">
 		                  {extensionStatus}
@@ -3536,9 +3658,45 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
 		                  <span className="text-xs text-stone-400">v{extensionVersion}</span>
 		                )}
 		              </div>
+                  {extensionNeedsUpgrade && (
+                    <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-700">
+                      Installed extension version is too old for page warming, overlay, and highlight. Required: v{REQUIRED_EXTENSION_VERSION}+.
+                      Reload the BrowserBud extension, then reload BrowserBud and the actual browsing tab.
+                    </div>
+                  )}
                   {extensionBridgeIssue && (
                     <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
                       {extensionBridgeIssue}
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => runOverlayDiagnostic(true)}
+                      className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-medium text-stone-600 transition-colors hover:bg-stone-100"
+                    >
+                      Test Overlay
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => runOverlayDiagnostic(false)}
+                      className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-medium text-stone-600 transition-colors hover:bg-stone-100"
+                    >
+                      Clear Overlay
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void runHighlightDiagnostic();
+                      }}
+                      className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-medium text-stone-600 transition-colors hover:bg-stone-100"
+                    >
+                      Test Highlight
+                    </button>
+                  </div>
+                  {extensionDiagnosticsMessage && (
+                    <div className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-xs leading-5 text-stone-600">
+                      {extensionDiagnosticsMessage}
                     </div>
                   )}
 		              {browserContextPacket ? (
@@ -3612,7 +3770,9 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
 		                  </div>
 		                ) : (
 		                  <div className="mt-3 text-xs leading-5 text-stone-500">
-		                    {pageInsightStatus === 'warming'
+		                    {extensionNeedsUpgrade
+		                      ? `Update the BrowserBud Chrome extension to v${REQUIRED_EXTENSION_VERSION}+ to warm page and PDF analysis.`
+		                      : pageInsightStatus === 'warming'
 		                      ? 'BrowserBud is reading and preparing the current page in the background.'
 		                      : pageInsightStatus === 'error'
 		                        ? pageInsightError || 'Background page analysis failed for this page.'
@@ -3988,7 +4148,7 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                               <div>
                                 <div className="text-sm font-medium text-stone-900">Element highlighting</div>
                                 <p className="mt-1 text-xs leading-5 text-stone-500">
-                                  Lets BrowserBud visually highlight the button, link, or input it wants you to use next on the browsing page.
+                                  Lets BrowserBud visually highlight the button, link, or input it wants you to use next on the browsing page. Requires extension v{REQUIRED_EXTENSION_VERSION}+ on the browsing tab.
                                 </p>
                               </div>
                               <button
