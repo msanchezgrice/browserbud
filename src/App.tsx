@@ -600,6 +600,8 @@ export default function App() {
   const pageInsightWarmFingerprintRef = useRef<string | null>(null);
   const lastScreenFrameForensicsAtRef = useRef(0);
   const lastHelpfulOverlaySignatureRef = useRef<string | null>(null);
+  const immediateScreenFrameTimerRef = useRef<number | null>(null);
+  const lastImmediateScreenFrameNavKeyRef = useRef<string | null>(null);
   
   // Interval Refs
   const videoIntervalRef = useRef<number | null>(null);
@@ -688,6 +690,12 @@ export default function App() {
 
     const previousPacket = previousBrowserContextRef.current;
     const isSignificantUpdate = isSignificantBrowserContextUpdate(previousPacket, browserContextPacket);
+    const pageNavigationChanged = !previousPacket
+      || previousPacket.url !== browserContextPacket.url
+      || previousPacket.page.pathname !== browserContextPacket.page.pathname
+      || previousPacket.page.search !== browserContextPacket.page.search
+      || previousPacket.page.hash !== browserContextPacket.page.hash
+      || previousPacket.title !== browserContextPacket.title;
     previousBrowserContextRef.current = browserContextPacket;
     if (!isSignificantUpdate) {
       return;
@@ -713,6 +721,16 @@ export default function App() {
         anchorCount: browserContextPacket.anchors.length,
       },
     });
+
+    if (isRunning && captureRequirements.requiresScreenShare) {
+      if (browserContextPacket.navEvent === 'completed' && pageNavigationChanged) {
+        queueImmediateScreenFrameRefresh(browserContextPacket, 'page_navigation');
+      } else if (browserContextPacket.navEvent === 'history_state_updated' && pageNavigationChanged) {
+        queueImmediateScreenFrameRefresh(browserContextPacket, 'page_navigation');
+      } else if (browserContextPacket.navEvent === 'activated' && pageNavigationChanged) {
+        queueImmediateScreenFrameRefresh(browserContextPacket, 'tab_activation');
+      }
+    }
 
     if (!isRunning) {
       return;
@@ -745,7 +763,7 @@ export default function App() {
       },
     });
     sendSessionPrompt(contextPrompt, { suppressOutput: true });
-  }, [browserContextPacket, isRunning]);
+  }, [browserContextPacket, isRunning, captureRequirements.requiresScreenShare, isSharing]);
 
   useEffect(() => {
     if (!browserContextPacket) {
@@ -1157,6 +1175,66 @@ export default function App() {
     });
   };
 
+  const sendImmediateScreenFrame = (
+    reason: 'page_navigation' | 'tab_activation',
+    browserPacket?: BrowserContextPacket | null,
+  ) => {
+    const pendingSession = sessionRef.current;
+    if (!pendingSession || !captureRequirements.requiresScreenShare || !isSharing) {
+      return;
+    }
+
+    const base64Image = captureFrame();
+    if (!base64Image) {
+      return;
+    }
+
+    recordSentScreenFrame(base64Image);
+    const pageContext = buildPageContextDetails(browserPacket || latestBrowserContextRef.current);
+    recordAnalyticsEventSafe({
+      source: 'browserbud-ui',
+      eventType: 'input.screen_frame_navigation_refresh',
+      appName: pageContext.appName,
+      pageTitle: pageContext.pageTitle,
+      url: pageContext.url,
+      domain: pageContext.domain,
+      payload: {
+        reason,
+        navEvent: browserPacket?.navEvent || null,
+        section: pageContext.section,
+        description: pageContext.description,
+      },
+    });
+    void pendingSession.then((session) => {
+      session.sendRealtimeInput({ video: { data: base64Image, mimeType: 'image/jpeg' } });
+    }).catch(() => {});
+  };
+
+  const queueImmediateScreenFrameRefresh = (
+    browserPacket: BrowserContextPacket,
+    reason: 'page_navigation' | 'tab_activation',
+  ) => {
+    if (!isRunning || !captureRequirements.requiresScreenShare || !isSharing) {
+      return;
+    }
+
+    const navKey = `${browserPacket.url}|${browserPacket.navEvent}|${browserPacket.documentId || ''}`;
+    if (lastImmediateScreenFrameNavKeyRef.current === navKey) {
+      return;
+    }
+    lastImmediateScreenFrameNavKeyRef.current = navKey;
+
+    if (immediateScreenFrameTimerRef.current) {
+      window.clearTimeout(immediateScreenFrameTimerRef.current);
+      immediateScreenFrameTimerRef.current = null;
+    }
+
+    immediateScreenFrameTimerRef.current = window.setTimeout(() => {
+      immediateScreenFrameTimerRef.current = null;
+      sendImmediateScreenFrame(reason, browserPacket);
+    }, 250);
+  };
+
   const playAudioChunk = (base64Audio: string) => {
     const playCtx = playCtxRef.current;
     if (!playCtx) return;
@@ -1214,6 +1292,11 @@ export default function App() {
     if (backgroundSaveIntervalRef.current) {
       clearInterval(backgroundSaveIntervalRef.current);
       backgroundSaveIntervalRef.current = null;
+    }
+
+    if (immediateScreenFrameTimerRef.current) {
+      window.clearTimeout(immediateScreenFrameTimerRef.current);
+      immediateScreenFrameTimerRef.current = null;
     }
   };
 
@@ -2206,6 +2289,7 @@ export default function App() {
     cleanupLiveSession({ closeSession: false, stopMic: true });
     sessionStartTimeRef.current = performance.now();
     firstAudioChunkSeenRef.current = false;
+    lastImmediateScreenFrameNavKeyRef.current = null;
     setDebugState((prev) => ({
       ...prev,
       firstAudioLatencyMs: null,
@@ -2950,6 +3034,7 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
     shouldStayConnectedRef.current = false;
     isStoppingRef.current = true;
     lastInjectedBrowserContextPromptRef.current = null;
+    lastImmediateScreenFrameNavKeyRef.current = null;
     postHelpfulOverlay('', null, false);
     clearReconnectTimer();
     cleanupLiveSession({ closeSession: true, stopMic: true });
