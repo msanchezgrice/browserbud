@@ -6,6 +6,7 @@ import type {
 } from '../src/analyticsTypes';
 import { AnalyticsBackendUnavailableError, type AnalyticsStoreAdapter } from './analyticsBackend.js';
 import { getAnalyticsStore } from './analyticsRuntime.js';
+import { captureServerException } from './sentry.js';
 
 function corsHeaders(extraHeaders: Record<string, string> = {}): HeadersInit {
   return {
@@ -95,6 +96,9 @@ async function runHandler(handler: () => Promise<Response> | Response): Promise<
   try {
     return await handler();
   } catch (error) {
+    // Report to Sentry before sending the error response so the full stack
+    // trace is preserved. Works for both Vercel serverless and Express paths.
+    captureServerException(error);
     const message = error instanceof Error ? error.message : 'Unexpected analytics API error.';
     const status = error instanceof AnalyticsBackendUnavailableError ? error.status : 400;
     return jsonResponse({ error: message }, status);

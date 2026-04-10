@@ -1,7 +1,15 @@
-import { StrictMode, Suspense, lazy, useEffect, useState } from 'react';
+import { StrictMode, Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { capturePageView, initPostHog } from './analytics/posthog';
+import { initSentry } from './analytics/sentry';
+import { CookieConsent } from './components/CookieConsent';
+import { GlobalErrorBoundary } from './components/GlobalErrorBoundary';
 import { resolveAppSurface, type AppSurface } from './appSurface';
 import './index.css';
+
+// Initialize Sentry synchronously before any React renders so that errors
+// during startup (including lazy-load failures) are captured.
+initSentry();
 
 const App = lazy(() => import('./App.tsx'));
 const Landing = lazy(() => import('./Landing.tsx'));
@@ -15,6 +23,19 @@ function getRoute(): AppSurface {
 
 function Router() {
   const [route, setRoute] = useState<AppSurface>(() => getRoute());
+  // Tracks whether the initial pageview has been captured so that SPA
+  // navigation events (popstate/hashchange) don't double-count page 1.
+  const initialPageViewCaptured = useRef(false);
+
+  // Lazy-load PostHog after first render so it never blocks the critical path.
+  useEffect(() => {
+    initPostHog().then(() => {
+      if (!initialPageViewCaptured.current) {
+        capturePageView();
+        initialPageViewCaptured.current = true;
+      }
+    });
+  }, []);
 
   useEffect(() => {
     const syncRoute = () => {
@@ -34,21 +55,32 @@ function Router() {
     };
   }, []);
 
+  // Fire a $pageview on every client-side route change after the initial load.
+  useEffect(() => {
+    if (!initialPageViewCaptured.current) return;
+    capturePageView();
+  }, [route]);
+
   return (
-    <Suspense
-      fallback={
-        <div className="flex min-h-screen items-center justify-center bg-[#FAFAF8] text-sm text-stone-500">
-          Loading BrowserBud…
-        </div>
-      }
-    >
-      {route === 'app' ? <App /> : <Landing />}
-    </Suspense>
+    <>
+      <Suspense
+        fallback={
+          <div className="flex min-h-screen items-center justify-center bg-[#FAFAF8] text-sm text-stone-500">
+            Loading BrowserBud…
+          </div>
+        }
+      >
+        {route === 'app' ? <App /> : <Landing />}
+      </Suspense>
+      <CookieConsent />
+    </>
   );
 }
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <Router />
+    <GlobalErrorBoundary>
+      <Router />
+    </GlobalErrorBoundary>
   </StrictMode>,
 );
