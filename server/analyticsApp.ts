@@ -7,6 +7,7 @@ import type {
   AnalyticsSessionCreateInput,
 } from '../src/analyticsTypes';
 import { AnalyticsBackendUnavailableError, type AnalyticsStoreAdapter } from './analyticsBackend.js';
+import { Sentry, initServerSentry } from './sentry.js';
 
 type CreateAnalyticsAppOptions = {
   store: AnalyticsStoreAdapter;
@@ -35,6 +36,8 @@ function optionalStringArray(value: unknown): string[] {
 }
 
 export function createAnalyticsApp(options: CreateAnalyticsAppOptions) {
+  initServerSentry();
+
   const app = express();
 
   app.use((req, res, next) => {
@@ -196,6 +199,10 @@ export function createAnalyticsApp(options: CreateAnalyticsAppOptions) {
       next(error);
     }
   });
+
+  // Sentry error handler must be registered before the custom error handler
+  // so that it can capture the error before a response is sent.
+  Sentry.setupExpressErrorHandler(app);
 
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const message = error instanceof Error ? error.message : 'Unexpected analytics API error.';
