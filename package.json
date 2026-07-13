@@ -27,6 +27,7 @@
     "motion": "^12.23.24",
     "pdfjs-dist": "^5.6.205",
     "postgres": "^3.4.8",
+    "posthog-js": "^1.399.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",

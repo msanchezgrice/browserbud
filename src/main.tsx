@@ -1,7 +1,20 @@
 import { StrictMode, Suspense, lazy, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import posthog from 'posthog-js';
 import { resolveAppSurface, type AppSurface } from './appSurface';
 import './index.css';
+
+const posthogToken = import.meta.env.VITE_POSTHOG_PROJECT_TOKEN?.trim();
+if (posthogToken) {
+  posthog.init(posthogToken, {
+    api_host: import.meta.env.VITE_POSTHOG_HOST || 'https://us.i.posthog.com',
+    ui_host: 'https://us.posthog.com',
+    defaults: '2026-05-30',
+    capture_exceptions: true,
+    debug: import.meta.env.DEV,
+  });
+  posthog.register({ site_id: 'browserbud.com', site_name: 'BrowserBud' });
+}
 
 const App = lazy(() => import('./App.tsx'));
 const Landing = lazy(() => import('./Landing.tsx'));
