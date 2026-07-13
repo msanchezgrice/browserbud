@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">BrowserBud Resources</title>
+  <desc id="desc">Practical guidance for browser assistance with privacy and control.</desc>
+  <rect width="1200" height="630" fill="#171713"/>
+  <circle cx="1050" cy="80" r="260" fill="#0f766e" opacity=".55"/>
+  <text x="90" y="190" fill="#c9fff4" font-family="system-ui,sans-serif" font-size="32" font-weight="700" letter-spacing="4">BROWSERBUD RESOURCES</text>
+  <text x="90" y="310" fill="#ffffff" font-family="system-ui,sans-serif" font-size="72" font-weight="800">Work with context.</text>
+  <text x="90" y="400" fill="#ffffff" font-family="system-ui,sans-serif" font-size="72" font-weight="800">Keep control.</text>
+  <text x="90" y="510" fill="#b9ded7" font-family="system-ui,sans-serif" font-size="30">Privacy, accessibility, and safer browser assistance.</text>
+</svg>
