@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://browserbud.com/sitemap.xml

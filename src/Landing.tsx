@@ -274,6 +274,7 @@ export default function Landing() {
             <a href="#features" className="hover:text-stone-900 transition-colors">Features</a>
             <a href="#how-it-works" className="hover:text-stone-900 transition-colors">How It Works</a>
             <a href="#use-cases" className="hover:text-stone-900 transition-colors">Use Cases</a>
+            <a href="/resources" className="hover:text-stone-900 transition-colors">Resources</a>
           </div>
           <a
             href="/app"
@@ -414,6 +415,9 @@ export default function Landing() {
             <a href="#features" className="hover:text-stone-600 transition-colors">Features</a>
             <a href="#how-it-works" className="hover:text-stone-600 transition-colors">How It Works</a>
             <a href="#use-cases" className="hover:text-stone-600 transition-colors">Use Cases</a>
+            <a href="/resources" className="hover:text-stone-600 transition-colors">Resources</a>
+            <a href="/privacy" className="hover:text-stone-600 transition-colors">Privacy</a>
+            <a href="/terms" className="hover:text-stone-600 transition-colors">Terms</a>
           </div>
         </div>
       </footer>
