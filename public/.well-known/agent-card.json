@@ -1,0 +1,13 @@
+{
+  "name": "BrowserBud",
+  "description": "Screen-aware AI companion for desktop browsers. Users share a tab or screen, bring their own Gemini API key, and BrowserBud answers questions about what is on screen, saves notes and context, and produces a structured activity log and session recap.",
+  "url": "https://browserbud.com",
+  "version": "0.0.0-alpha",
+  "provider": {
+    "organization": "BrowserBud",
+    "url": "https://browserbud.com/about"
+  },
+  "capabilities": [],
+  "documentationUrl": "https://browserbud.com/agents.md",
+  "contact": "msanchezgrice@gmail.com"
+}

@@ -3841,6 +3841,10 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                     onClick={resetPersonas}
                     className="text-xs text-stone-400 hover:text-stone-600 transition-colors"
                     title="Reset to defaults"
+                    data-testid="reset-personas-button"
+                    data-agent-action="reset-personas"
+                    data-agent-danger="true"
+                    data-agent-confirm="Are you sure you want to reset to default personalities? All custom ones will be lost."
                   >
                     <RotateCcw className="w-4 h-4" />
                   </button>
@@ -3916,6 +3920,9 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
                       <Trash2
                         className="w-4 h-4 text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity hover:text-rose-500"
                         onClick={(e) => deletePersona(p.id, e)}
+                        data-testid={`delete-persona-${p.id}`}
+                        data-agent-action="delete-persona"
+                        data-agent-danger="true"
                       />
                     )}
                   </button>
@@ -4102,6 +4109,9 @@ ${browserContextEnabled ? '- When the user asks about off-screen content, page c
 	                            <button
 	                              onClick={() => setUserApiKey('')}
 	                              className="text-xs text-stone-400 transition-colors hover:text-stone-600"
+	                              data-testid="clear-api-key-button"
+	                              data-agent-action="clear-api-key"
+	                              data-agent-danger="true"
 	                            >
 	                              Clear
 	                            </button>

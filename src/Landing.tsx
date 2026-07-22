@@ -278,6 +278,8 @@ export default function Landing() {
           </div>
           <a
             href="/app"
+            data-testid="cta-nav-try-it-now"
+            data-agent-action="open-app"
             className="hidden sm:inline-flex items-center gap-1.5 rounded-full bg-teal-600 px-5 py-2 text-sm font-medium text-white shadow-sm shadow-teal-600/20 hover:bg-teal-700 transition-colors"
           >
             Try It Now
@@ -285,6 +287,7 @@ export default function Landing() {
         </div>
       </nav>
 
+      <main>
       {/* ============================================================ */}
       {/*  HERO                                                         */}
       {/* ============================================================ */}
@@ -328,6 +331,8 @@ export default function Landing() {
         >
           <a
             href="/app"
+            data-testid="cta-hero-open-alpha"
+            data-agent-action="open-app"
             className="inline-flex items-center gap-2 rounded-full bg-teal-600 px-7 py-3 text-[15px] font-semibold text-white shadow-md shadow-teal-600/20 hover:bg-teal-700 transition-colors"
           >
             Open The Alpha <ArrowRight size={16} />
@@ -400,6 +405,8 @@ export default function Landing() {
         </div>
       </section>
 
+      </main>
+
       {/* ============================================================ */}
       {/*  FOOTER                                                       */}
       {/* ============================================================ */}
@@ -418,6 +425,8 @@ export default function Landing() {
             <a href="/resources" className="hover:text-stone-600 transition-colors">Resources</a>
             <a href="/privacy" className="hover:text-stone-600 transition-colors">Privacy</a>
             <a href="/terms" className="hover:text-stone-600 transition-colors">Terms</a>
+            <a href="/llms.txt" className="hover:text-stone-600 transition-colors">llms.txt</a>
+            <a href="/agents.md" className="hover:text-stone-600 transition-colors">agents.md</a>
           </div>
         </div>
       </footer>
