@@ -36,7 +36,32 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap" rel="stylesheet">
-  <meta property="og:image:type" content="image/png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"></head>
+  <meta property="og:image:type" content="image/png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <!-- Structured data -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "Organization",
+          "@id": "https://browserbud.com/#organization",
+          "name": "BrowserBud",
+          "url": "https://browserbud.com",
+          "logo": "https://browserbud.com/browserbud-og.png",
+          "description": "BrowserBud is a screen-aware AI companion for desktop browsers that answers questions about what is on screen, saves notes and context, and produces session recaps.",
+          "email": "msanchezgrice@gmail.com"
+        },
+        {
+          "@type": "WebSite",
+          "@id": "https://browserbud.com/#website",
+          "name": "BrowserBud",
+          "url": "https://browserbud.com",
+          "publisher": { "@id": "https://browserbud.com/#organization" }
+        }
+      ]
+    }
+    </script>
+  </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

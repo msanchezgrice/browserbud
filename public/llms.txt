@@ -1,0 +1,46 @@
+# BrowserBud
+
+> BrowserBud is a screen-aware AI companion for desktop browsers. You share a tab or your screen, bring your own Gemini API key, and BrowserBud answers questions about what is on screen, saves notes and context, and leaves behind a structured activity log and session recap.
+
+## Product
+
+- [Home](https://browserbud.com/): product overview, features, and how it works
+- [Open the app](https://browserbud.com/app): the BrowserBud alpha. Desktop browser only; requires the user's own Gemini API key, entered inside the app
+
+## Workflows
+
+- [Screen-aware notes](https://browserbud.com/workflows/screen-aware-notes): how BrowserBud captures notes from what you are looking at
+- [Research session recap](https://browserbud.com/workflows/research-session-recap): how a browsing session becomes a reusable recap
+- [Ask questions about the current page](https://browserbud.com/workflows/ask-questions-about-current-page): voice-first Q&A grounded in the page on screen
+
+## Comparisons
+
+- [BrowserBud vs ScreenHelp](https://browserbud.com/vs/screenhelp): neutral feature comparison with cited sources
+
+## Guides and resources
+
+- [Resources index](https://browserbud.com/resources)
+- [A privacy threat model for browser AI](https://browserbud.com/resources/browser-ai-privacy-threat-model)
+- [Least-privilege browser permissions, explained in plain English](https://browserbud.com/resources/least-privilege-browser-permissions-explained-in-plain-english)
+- [25 browser workflows worth assisting, and 10 that need a human](https://browserbud.com/resources/25-browser-workflows-worth-assisting-and-10-that-need-a-human)
+- [Contextual help without constant surveillance](https://browserbud.com/resources/contextual-help-without-constant-surveillance)
+- [Browser assistants and accessibility: where they help, where they break](https://browserbud.com/resources/browser-assistants-and-accessibility-where-they-help-where-they-break)
+- [Prompt injection from the page you're reading](https://browserbud.com/resources/prompt-injection-from-the-page-youre-reading)
+- [A context menu for knowledge work: a design pattern library](https://browserbud.com/resources/context-menu-for-knowledge-work-a-design-pattern-library)
+- [How to audit a browser extension before installing it](https://browserbud.com/resources/how-to-audit-a-browser-extension-before-installing-it)
+- [Action logs and undo: the trust features browser agents need](https://browserbud.com/resources/action-logs-and-undo-the-trust-features-browser-agents-need)
+- [Testing browser AI with keyboard and screen readers](https://browserbud.com/resources/testing-browser-ai-with-keyboard-and-screen-readers)
+
+## Company and legal
+
+- [About](https://browserbud.com/about)
+- [Contact](https://browserbud.com/contact): email msanchezgrice@gmail.com with "BrowserBud" in the subject line
+- [Privacy policy](https://browserbud.com/privacy)
+- [Terms of service](https://browserbud.com/terms)
+
+## Agent resources
+
+- [agents.md](https://browserbud.com/agents.md): guidance for AI agents interacting with this site
+- [agent-card.json](https://browserbud.com/.well-known/agent-card.json): A2A-style agent manifest
+- [ai-agent.json](https://browserbud.com/.well-known/ai-agent.json): agent guardrails and allowed/disallowed actions
+- [sitemap.xml](https://browserbud.com/sitemap.xml)

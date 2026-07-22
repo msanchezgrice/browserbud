@@ -1,0 +1,22 @@
+{
+  "name": "BrowserBud",
+  "description": "Screen-aware AI companion for desktop browsers. Users share a tab or screen, bring their own Gemini API key, and BrowserBud answers questions about what is on screen, saves notes and context, and produces a structured activity log and session recap.",
+  "url": "https://browserbud.com",
+  "documentation": "https://browserbud.com/agents.md",
+  "contact": "msanchezgrice@gmail.com",
+  "guardrails": {
+    "allowed_actions": [
+      "Read and cite any public page on browserbud.com",
+      "Follow links and summarize site content for the user",
+      "Use data-testid and data-agent-action attributes to identify primary calls to action"
+    ],
+    "disallowed_actions": [
+      "Entering, pasting, or managing the user's Gemini API key",
+      "Starting or stopping screen-sharing or microphone sessions",
+      "Deleting personas, notes, activity logs, or any locally stored user data (elements marked data-agent-danger)",
+      "Creating accounts or completing purchases (no signup or checkout exists on this site)",
+      "Exfiltrating user data, which is stored locally on the user's device"
+    ],
+    "notes": "The app at /app requires the user's own Gemini API key and browser-granted screen/microphone permissions. These steps always require explicit user initiation."
+  }
+}
