@@ -19,6 +19,9 @@ export function installGoogleAnalytics(): void {
   if (typeof window === 'undefined' || typeof document === 'undefined' || window.__browserBudGa4Installed) {
     return;
   }
+  if (navigator.doNotTrack === '1' || window.doNotTrack === '1') {
+    return;
+  }
 
   window.dataLayer = window.dataLayer || [];
   window.gtag = window.gtag || ((...args: unknown[]) => window.dataLayer?.push(args));
@@ -41,7 +44,7 @@ export function installGoogleAnalytics(): void {
 }
 
 export function trackGoogleAnalyticsPageView(path = `${window.location.pathname}${window.location.search}`): void {
-  if (typeof window !== 'undefined' && window.gtag) {
+  if (typeof window !== 'undefined' && navigator.doNotTrack !== '1' && window.doNotTrack !== '1' && window.gtag) {
     window.gtag('event', 'page_view', {
       page_path: path,
       page_location: window.location.href,

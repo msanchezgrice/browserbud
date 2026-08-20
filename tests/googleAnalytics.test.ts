@@ -10,4 +10,5 @@ test('BrowserBud GA4 loader is privacy-conscious and idempotent', () => {
   assert.match(installGoogleAnalytics.toString(), /allow_google_signals/);
   assert.match(installGoogleAnalytics.toString(), /allow_ad_personalization_signals/);
   assert.match(installGoogleAnalytics.toString(), /send_page_view/);
+  assert.match(installGoogleAnalytics.toString(), /doNotTrack/);
 });
