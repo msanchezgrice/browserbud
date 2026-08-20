@@ -2,7 +2,10 @@ import { StrictMode, Suspense, lazy, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import posthog from 'posthog-js';
 import { resolveAppSurface, type AppSurface } from './appSurface';
+import { installGoogleAnalytics, trackGoogleAnalyticsPageView } from './googleAnalytics';
 import './index.css';
+
+installGoogleAnalytics();
 
 const posthogToken = import.meta.env.VITE_POSTHOG_PROJECT_TOKEN?.trim();
 if (posthogToken) {
@@ -30,11 +33,17 @@ function Router() {
   const [route, setRoute] = useState<AppSurface>(() => getRoute());
 
   useEffect(() => {
+    let previousLocation = window.location.href;
     const syncRoute = () => {
       if (window.location.hash === '#/app' && window.location.pathname !== '/app') {
         window.history.replaceState(null, '', '/app');
       }
+      const nextLocation = window.location.href;
       setRoute(getRoute());
+      if (nextLocation !== previousLocation) {
+        trackGoogleAnalyticsPageView();
+        previousLocation = nextLocation;
+      }
     };
 
     window.addEventListener('popstate', syncRoute);
